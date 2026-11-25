@@ -46,7 +46,7 @@ pub fn source_for_prefix(prefix: &str) -> Option<DataSource> {
 pub fn parse(text: &str) -> Option<VenueQuery> {
     let (prefix, symbol) = text.split_once(':')?;
     let source = match source_for_prefix(prefix) {
-        Some(DataSource::Binance) if symbol.trim().eq_ignore_ascii_case("BTCUSDT.P") => {
+        Some(DataSource::Binance) if super::is_usdm_perpetual(symbol) => {
             Some(DataSource::BinanceUsdM)
         }
         source => source,

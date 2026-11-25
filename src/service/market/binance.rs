@@ -1,7 +1,8 @@
 use super::candles::plan;
 use super::catalog::Catalog;
 use super::search_rank::normalize;
-use crate::model::{DataSource, InstrumentId, Kline, Timeframe};
+use crate::model::market::{USD_M_CONTRACTS, usdm_contract};
+use crate::model::{DataSource, Kline, Timeframe};
 use crate::service::{MarketSource, ProviderError, SearchResult, rank_results};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,13 +32,13 @@ impl Binance {
         limit: usize,
     ) -> Result<String, ProviderError> {
         let symbol = if self.source == DataSource::BinanceUsdM {
-            let id = InstrumentId::new(self.source, symbol).api_symbol();
-            if id != "BTCUSDT" {
-                return Err(ProviderError::other(crate::i18n::tr!(
-                    "Binance USD-M charts currently support BTCUSDT.P only."
-                )));
-            }
-            id
+            usdm_contract(symbol)
+                .ok_or_else(|| {
+                    ProviderError::other(crate::i18n::tr!(
+                        "Binance USD-M charts currently support BTCUSDT.P and ETHUSDT.P."
+                    ))
+                })?
+                .to_owned()
         } else {
             symbol.to_uppercase()
         };
@@ -143,11 +144,15 @@ impl MarketSource for Binance {
             return Ok(Vec::new());
         }
         if self.source == DataSource::BinanceUsdM {
-            let hit = SearchResult::new(self.source, "BTCUSDT.P", "BTCUSDT.P").pair("BTC", "USDT");
-            return Ok("BTCUSDTP"
-                .contains(&needle)
-                .then_some(hit)
+            return Ok(USD_M_CONTRACTS
                 .into_iter()
+                .filter_map(|id| {
+                    let label = self.source.display_symbol(id);
+                    normalize(&label).contains(&needle).then(|| {
+                        SearchResult::new(self.source, &label, &label)
+                            .pair(self.source.base_asset(id), "USDT")
+                    })
+                })
                 .collect());
         }
         let pairs = CATALOG.get(download_pairs)?;
@@ -295,14 +300,24 @@ mod tests {
     }
 
     #[test]
-    fn usdm_lists_only_btc_perpetual_and_routes_to_futures_klines() {
+    fn usdm_lists_btc_and_eth_perpetuals_and_routes_to_futures_klines() {
         for query in ["BTC", "BTC/USDT", "btcusdt.p"] {
             let hits = BINANCE_USDM.search_tickers(query).unwrap();
             assert_eq!(hits.len(), 1, "{query}");
             assert_eq!(hits[0].source, DataSource::BinanceUsdM);
             assert_eq!(hits[0].full_symbol, "BTCUSDT.P");
         }
-        assert!(BINANCE_USDM.search_tickers("ETH").unwrap().is_empty());
+        let eth = BINANCE_USDM.search_tickers("ETH").unwrap();
+        assert_eq!(eth.len(), 1);
+        assert_eq!(eth[0].full_symbol, "ETHUSDT.P");
+        assert_eq!(eth[0].base.as_deref(), Some("ETH"));
+        assert_eq!(
+            BINANCE_USDM
+                .candle_url("ETHUSDT.P", Timeframe::MINUTE_1, 4)
+                .unwrap(),
+            "https://fapi.binance.com/fapi/v1/klines?symbol=ETHUSDT&interval=1m&limit=4",
+        );
+        assert!(BINANCE_USDM.search_tickers("SOL").unwrap().is_empty());
         assert_eq!(
             BINANCE_USDM
                 .candle_url("BTCUSDT.P", Timeframe::MINUTE_1, 4)
@@ -311,20 +326,22 @@ mod tests {
         );
         assert!(
             BINANCE_USDM
-                .candle_url("ETHUSDT.P", Timeframe::MINUTE_1, 4)
+                .candle_url("SOLUSDT.P", Timeframe::MINUTE_1, 4)
                 .is_err()
         );
     }
 
     #[test]
-    fn usdm_folds_custom_minutes_but_does_not_offer_seconds() {
+    fn usdm_folds_custom_minutes_and_provides_seconds_from_live_trades() {
         let source = DataSource::BinanceUsdM;
         let custom = Timeframe::parse("7m").unwrap();
         assert_eq!(source.plan(custom).unwrap().base(), Timeframe::MINUTE_1);
         assert!(source.supports_older_history(custom));
         let seconds = Timeframe::parse("7s").unwrap();
         assert!(DataSource::Binance.serves(seconds));
-        assert!(!source.serves(seconds));
+        assert!(source.serves(seconds));
+        assert!(source.streams_trades_for(seconds));
+        assert!(!source.supports_older_history(seconds));
         assert!(
             BINANCE_USDM
                 .fetch_klines("BTCUSDT.P", seconds, 4)

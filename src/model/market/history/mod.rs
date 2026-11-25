@@ -11,6 +11,14 @@ use std::time::{Duration, Instant};
 pub const PAGE: usize = 1_000;
 /// The most candles a chart keeps; paging stops there rather than growing without bound.
 pub const MAX_CANDLES: usize = 100_000;
+/// Live-only series have no periodic REST refresh to cap them. Make room in batches so a long
+/// running chart does not shift the entire series on every new candle.
+pub(crate) fn trim_live(candles: &mut Vec<Kline>) {
+    if candles.len() > MAX_CANDLES {
+        candles.drain(..PAGE);
+    }
+}
+
 /// How many candles a chart with a script on it pages back to by itself, without the user scrolling
 /// there: the 5,000 bars TradingView's Basic plan runs a script over (a Basic account's 5m chart
 /// of OKX BTC-USDC held 6,063, 21 days). A script keeps state across

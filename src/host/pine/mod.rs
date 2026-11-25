@@ -185,7 +185,7 @@ fn resolve_symbol(symbol: &str) -> Option<(DataSource, String)> {
     if let Some(query) = crate::model::market::venue::parse(symbol) {
         return Some((query.source?, query.symbol));
     }
-    let source = if symbol.trim().eq_ignore_ascii_case("BTCUSDT.P") {
+    let source = if crate::model::market::is_usdm_perpetual(symbol) {
         DataSource::BinanceUsdM
     } else {
         DataSource::Binance

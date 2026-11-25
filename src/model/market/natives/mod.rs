@@ -212,9 +212,17 @@ impl DataSource {
         FoldPlan::new(timeframe, self.natives())
     }
 
+    /// Whether a chart builds these candles from live trades instead of requesting kline history.
+    pub(crate) fn streams_trades_for(self, timeframe: Timeframe) -> bool {
+        self == Self::BinanceUsdM && timeframe.is_subminute()
+    }
+
     /// Whether the source can chart `timeframe`: its candles fold to it, CoinGecko's price
     /// samples are fine enough, or the source draws a line that follows any timeframe.
     pub fn serves(self, timeframe: Timeframe) -> bool {
+        if self.streams_trades_for(timeframe) {
+            return true;
+        }
         match self {
             Self::Binance
             | Self::BinanceUsdM
@@ -238,10 +246,10 @@ impl DataSource {
     /// 180 days: a page of its base candles that already spans that has no older one.
     pub fn supports_older_history(self, timeframe: Timeframe) -> bool {
         match self {
+            Self::BinanceUsdM => !self.streams_trades_for(timeframe),
             // Kraken's OHLC answers the newest 720 candles whatever is asked: the chart's first
             // 500 leave the rest for the first older page, and a second page is empty.
             Self::Binance
-            | Self::BinanceUsdM
             | Self::Coinbase
             | Self::Okx
             | Self::Kraken

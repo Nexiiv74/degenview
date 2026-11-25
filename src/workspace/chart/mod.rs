@@ -343,6 +343,13 @@ impl Chart {
         if !self.is_market() {
             return;
         }
+        if self.source.streams_trades_for(timeframe) {
+            self.fetch_generation.fetch_add(1, Ordering::AcqRel);
+            self.inbox = None;
+            self.error = None;
+            self.loading = self.candles.is_empty();
+            return;
+        }
         let (sender, receiver) = mpsc::channel();
         let symbol = self.symbol.clone();
         let source = self.source;

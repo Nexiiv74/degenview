@@ -7,7 +7,10 @@ use super::{
 };
 use crate::format;
 use crate::i18n::tr;
-use crate::model::Timeframe;
+use crate::model::market::history::trim_live;
+use crate::model::market::live::{CandleUpdate, apply_live, remove_candle};
+use crate::model::{InstrumentId, Timeframe};
+use crate::service::market::live::LiveFeed;
 use crate::service::work_queue;
 use crate::service::{self, ProviderError};
 use eframe::egui;
@@ -33,6 +36,40 @@ impl PreviewState {
         self.loading = true;
         self.last_fetch = Some(Instant::now());
         self.fetched_for = Some((self.market.clone(), self.timeframe));
+    }
+
+    pub(super) fn stream_trades(&mut self, ctx: &egui::Context) {
+        if cfg!(test) {
+            return;
+        }
+        if self.trade_feed.is_none() {
+            let instrument = InstrumentId::new(self.market.source, &self.market.ticker);
+            self.trade_feed = LiveFeed::connect(
+                instrument.source,
+                vec![instrument.api_symbol()],
+                self.timeframe,
+                ctx.clone(),
+            );
+        }
+        let Some(feed) = &self.trade_feed else { return };
+        let updates = feed.inbox.drain_updates();
+        if updates.is_empty() {
+            return;
+        }
+        let mut candles = std::mem::take(&mut self.candles);
+        for (_, update) in updates {
+            match update {
+                CandleUpdate::Replace(bar) => {
+                    apply_live(&mut candles, bar);
+                }
+                CandleUpdate::Remove(open) => {
+                    remove_candle(&mut candles, open);
+                }
+            }
+        }
+        trim_live(&mut candles);
+        self.set_candles(candles);
+        self.loading = false;
     }
 
     pub(super) fn receive_candles(&mut self) {
@@ -62,8 +99,7 @@ impl PreviewState {
             self.set_candles(Vec::new());
             self.show_newest_bars();
             self.market = market.clone();
-            self.fetched_for = None;
-            self.error = None;
+            self.reset_fetch();
         }
         self.recents.retain(|m| m != &market);
         self.recents.insert(0, market);
@@ -77,9 +113,18 @@ impl PreviewState {
             self.timeframe = timeframe;
             self.set_candles(Vec::new());
             self.show_newest_bars();
-            self.fetched_for = None;
+            self.reset_fetch();
             self.save(TIMEFRAME_KEY, &timeframe);
         }
+    }
+
+    fn reset_fetch(&mut self) {
+        self.inbox = None;
+        self.trade_feed = None;
+        self.fetched_for = None;
+        self.last_fetch = None;
+        self.loading = false;
+        self.error = None;
     }
 
     /// Back to the newest bars with the price axis on autoscale, as the workspace does when a

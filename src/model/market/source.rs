@@ -150,7 +150,7 @@ impl DataSource {
     pub fn display_symbol(self, symbol: &str) -> String {
         let raw = symbol.trim();
         match self {
-            Self::BinanceUsdM if binance_usdm_btc(symbol) => "BTCUSDT.P".to_owned(),
+            Self::BinanceUsdM if let Some(id) = usdm_contract(symbol) => format!("{id}.P"),
             Self::BinanceUsdM
             | Self::Binance
             | Self::Coinbase
@@ -173,7 +173,9 @@ impl DataSource {
         let upper = symbol.trim().to_uppercase();
         let head = upper.split(['/', '-', ' ', '_']).next().unwrap_or(&upper);
         match self {
-            Self::BinanceUsdM if binance_usdm_btc(symbol) => "BTC",
+            Self::BinanceUsdM if let Some(id) = usdm_contract(symbol) => {
+                id.trim_end_matches("USDT")
+            }
             // A one-letter "base" is a bare wrapped asset (WBTC, WETH), not a pair.
             Self::Binance | Self::Bybit => split_binance_pair(head)
                 .map(|(base, _)| base)
@@ -193,7 +195,7 @@ impl DataSource {
     pub fn quote_asset(self, symbol: &str) -> Option<String> {
         let upper = symbol.trim().to_uppercase();
         match self {
-            Self::BinanceUsdM if binance_usdm_btc(symbol) => Some("USDT".to_owned()),
+            Self::BinanceUsdM if usdm_contract(symbol).is_some() => Some("USDT".to_owned()),
             Self::Binance | Self::Bybit => {
                 split_binance_pair(&upper).map(|(_, quote)| quote.to_owned())
             }
@@ -218,10 +220,19 @@ impl DataSource {
     }
 }
 
-/// The only USD-M contract exposed by the chart source.
-pub(crate) fn binance_usdm_btc(symbol: &str) -> bool {
+/// The USD-M perpetuals this provider exposes and their exact Binance API identifiers.
+pub(crate) const USD_M_CONTRACTS: [&str; 2] = ["BTCUSDT", "ETHUSDT"];
+
+pub(crate) fn usdm_contract(symbol: &str) -> Option<&'static str> {
     let upper = symbol.trim().to_ascii_uppercase().replace(['/', '-'], "");
-    matches!(upper.as_str(), "BTCUSDT" | "BTCUSDT.P")
+    let api_symbol = upper.strip_suffix(".P").unwrap_or(&upper);
+    USD_M_CONTRACTS.into_iter().find(|id| *id == api_symbol)
+}
+
+pub(crate) fn is_usdm_perpetual(symbol: &str) -> bool {
+    symbol.trim().rsplit_once('.').is_some_and(|(_, suffix)| {
+        suffix.eq_ignore_ascii_case("P") && usdm_contract(symbol).is_some()
+    })
 }
 
 /// Kraken's own spelling of an asset is the legacy one (`XBT`, `XDG`) in some places; its APIs take

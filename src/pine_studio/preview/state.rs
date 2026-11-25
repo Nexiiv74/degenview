@@ -68,6 +68,7 @@ impl PreviewState {
             loading: false,
             error: None,
             inbox: None,
+            trade_feed: None,
             last_fetch: None,
             fetched_for: None,
             card,

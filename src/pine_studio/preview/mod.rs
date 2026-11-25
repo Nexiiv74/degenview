@@ -10,6 +10,7 @@ use crate::model::pine::script::ScriptType;
 use crate::model::{DataSource, Kline, Timeframe};
 use crate::pine::compiler::program::{InputSchema, InputValue};
 use crate::service::ProviderError;
+use crate::service::market::live::LiveFeed;
 use crate::service::work_queue::Pending;
 use crate::store::SharedStore;
 use crate::ui::ChartCard;
@@ -59,6 +60,7 @@ impl PreviewMarket {
         matches!(
             source,
             DataSource::Binance
+                | DataSource::BinanceUsdM
                 | DataSource::Coinbase
                 | DataSource::Okx
                 | DataSource::Kraken
@@ -139,6 +141,7 @@ pub struct PreviewState {
     loading: bool,
     error: Option<ProviderError>,
     inbox: Option<Pending<Result<Vec<Kline>, ProviderError>>>,
+    trade_feed: Option<LiveFeed>,
     last_fetch: Option<Instant>,
     /// What the candles on screen were fetched for.
     fetched_for: Option<(PreviewMarket, Timeframe)>,
