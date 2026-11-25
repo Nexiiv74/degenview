@@ -609,16 +609,16 @@ fn receive_fetch(series: &mut Series, timeframe: Timeframe, now: Instant) -> boo
     series.inbox = None;
     match result {
         Ok(fresh) => {
-            let live_open = series
+            let live = series
                 .live
                 .zip(series.last_fetch)
-                .and_then(|(mark, begun)| mark.guard_for(begun));
+                .map(|(mark, begun)| mark.for_refresh(begun));
             let merged = series.live_fold.merge_fetched(
                 timeframe,
                 fresh.candles,
                 fresh.bars,
                 &series.candles,
-                live_open,
+                live.unwrap_or_default(),
                 CANDLE_LIMIT as usize,
             );
             let candles =

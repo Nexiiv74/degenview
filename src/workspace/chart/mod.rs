@@ -517,13 +517,13 @@ impl Chart {
         self.inbox = None;
         match result {
             Ok(fetched) => {
-                let live_open = self.live.and_then(|mark| mark.guard_for(self.last_fetch));
+                let live = self.live.map(|mark| mark.for_refresh(self.last_fetch));
                 let fresh = self.live_fold.merge_fetched(
                     timeframe,
                     fetched.candles,
                     fetched.bars,
                     &self.candles,
-                    live_open,
+                    live.unwrap_or_default(),
                     CANDLE_LIMIT as usize,
                 );
                 self.candles =

@@ -100,15 +100,16 @@ impl PreviewState {
         match result {
             Ok(fresh) => {
                 let candles = if self.streams_seconds() {
-                    let live_open = self
+                    let live = self
                         .last_fetch
-                        .and_then(|at| self.live_mark.and_then(|mark| mark.guard_for(at)));
+                        .zip(self.live_mark)
+                        .map(|(at, mark)| mark.for_refresh(at));
                     let candles = self.live_fold.merge_fetched(
                         self.timeframe,
                         fresh.candles,
                         fresh.bars,
                         &self.candles,
-                        live_open,
+                        live.unwrap_or_default(),
                         CANDLE_LIMIT as usize,
                     );
                     with_older(&self.candles, candles, true)

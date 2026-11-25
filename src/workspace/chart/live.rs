@@ -353,8 +353,8 @@ mod tests {
                 "each bar once, each chart its own"
             );
             assert_eq!(
-                chart.live.map(|mark| mark.guard_for(Instant::now())),
-                Some(None)
+                chart.live.map(|mark| mark.for_refresh(Instant::now())),
+                Some(crate::model::market::live::LiveRefresh::Quiet)
             );
         }
     }
