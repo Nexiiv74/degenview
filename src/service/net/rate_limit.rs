@@ -37,6 +37,7 @@ impl RateLimiter {
 static COINGECKO: OnceLock<RateLimiter> = OnceLock::new();
 static GECKOTERMINAL: OnceLock<RateLimiter> = OnceLock::new();
 static KRAKEN: OnceLock<RateLimiter> = OnceLock::new();
+static BINANCE_USDM: OnceLock<RateLimiter> = OnceLock::new();
 
 pub fn coingecko() -> &'static RateLimiter {
     COINGECKO.get_or_init(|| RateLimiter::new(Duration::from_secs(4)))
@@ -52,4 +53,9 @@ pub fn kraken() -> &'static RateLimiter {
 
 pub fn geckoterminal() -> &'static RateLimiter {
     GECKOTERMINAL.get_or_init(|| RateLimiter::new(Duration::from_millis(2_200)))
+}
+
+/// Space history pages, live repairs and watchlist quotes across both contracts.
+pub fn binance_usdm() -> &'static RateLimiter {
+    BINANCE_USDM.get_or_init(|| RateLimiter::new(Duration::from_millis(150)))
 }

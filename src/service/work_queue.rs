@@ -242,6 +242,8 @@ static COINGECKO_LANE: WorkQueue = WorkQueue::new(1);
 static SEARCHES: WorkQueue = WorkQueue::new(4);
 static GECKOTERMINAL_LANE: WorkQueue = WorkQueue::new(1);
 static KRAKEN_LANE: WorkQueue = WorkQueue::new(1);
+// Futures history pages share an HTTP allowance and can wait behind a cold load.
+static BINANCE_USDM_LANE: WorkQueue = WorkQueue::new(2);
 
 pub fn submit(job: impl FnOnce() + Send + 'static) {
     QUEUE.submit(job);
@@ -262,6 +264,7 @@ fn lane(source: crate::model::DataSource) -> &'static WorkQueue {
         DataSource::CoinGecko => &COINGECKO_LANE,
         DataSource::DexScreener => &GECKOTERMINAL_LANE,
         DataSource::Kraken => &KRAKEN_LANE,
+        DataSource::BinanceUsdM => &BINANCE_USDM_LANE,
         _ => &QUEUE,
     }
 }

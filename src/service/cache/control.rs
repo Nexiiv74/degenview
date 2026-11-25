@@ -50,6 +50,7 @@ fn clear_memory() {
     icon::clear_memory();
     lookup::shared().clear_memory();
     binance::clear_catalog();
+    binance::clear_seconds_memory();
     coinbase::clear_catalog();
     okx::clear_catalog();
     kraken::clear_catalog();
