@@ -26,8 +26,9 @@ const RELATED_LIMIT: usize = 6;
 
 /// The markets the picker lists, in the order the providers are asked (and so the order exchanges
 /// that list the same market appear in).
-pub const PROVIDERS: [DataSource; 10] = [
+pub const PROVIDERS: [DataSource; 11] = [
     DataSource::Binance,
+    DataSource::BinanceUsdM,
     DataSource::Coinbase,
     DataSource::Okx,
     DataSource::Kraken,
@@ -167,6 +168,7 @@ pub fn trading_kind(source: DataSource) -> &'static str {
         | DataSource::Bybit
         | DataSource::Gate
         | DataSource::Mexc => tr!("Spot"),
+        DataSource::BinanceUsdM => tr!("Perpetual"),
         DataSource::DexScreener => tr!("DEX"),
         DataSource::CoinGecko => tr!("Aggregate"),
         DataSource::Alpaca => tr!("Stock"),
@@ -385,6 +387,7 @@ fn same(a: &SearchResult, b: &SearchResult) -> bool {
 fn related_markets(asset: &str) -> Vec<SearchResult> {
     let groups: Vec<Vec<SearchResult>> = [
         DataSource::Binance,
+        DataSource::BinanceUsdM,
         DataSource::Coinbase,
         DataSource::Okx,
         DataSource::Kraken,
@@ -487,7 +490,15 @@ mod tests {
             "BTC — Grayscale Bitcoin Mini Trust",
             "BTC",
         )];
-        for (source, results) in [(DataSource::Binance, binance), (DataSource::Alpaca, share)] {
+        let perpetual = vec![
+            SearchResult::new(DataSource::BinanceUsdM, "BTCUSDT.P", "BTCUSDT.P")
+                .pair("BTC", "USDT"),
+        ];
+        for (source, results) in [
+            (DataSource::Binance, binance),
+            (DataSource::BinanceUsdM, perpetual),
+            (DataSource::Alpaca, share),
+        ] {
             search.answers.insert(("btc".into(), source), Ok(results));
         }
         for source in [
@@ -508,7 +519,12 @@ mod tests {
         let names: Vec<&str> = all.results.iter().map(|r| r.symbol.as_str()).collect();
         assert_eq!(
             names,
-            ["BTCUSDT", "BTC — Grayscale Bitcoin Mini Trust", "BTCTRY"]
+            [
+                "BTCUSDT",
+                "BTCUSDT.P",
+                "BTC — Grayscale Bitcoin Mini Trust",
+                "BTCTRY"
+            ]
         );
         assert!(!all.searching);
 

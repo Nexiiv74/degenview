@@ -194,6 +194,7 @@ pub fn clear_memory() {
 fn base_symbol(source: DataSource, symbol: &str) -> String {
     match source {
         DataSource::Binance
+        | DataSource::BinanceUsdM
         | DataSource::Coinbase
         | DataSource::Okx
         | DataSource::Kraken

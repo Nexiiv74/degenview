@@ -182,29 +182,15 @@ fn construct(modifier: Option<ticker::TickerModifier>, candles: Vec<Kline>) -> V
 /// `SOURCE:SYMBOL` resolves to that source; a bare symbol defaults to Binance, the chart's default
 /// source.
 fn resolve_symbol(symbol: &str) -> Option<(DataSource, String)> {
-    if let Some((prefix, rest)) = symbol.split_once(':') {
-        return Some((source_for_slug(prefix)?, rest.to_owned()));
+    if let Some(query) = crate::model::market::venue::parse(symbol) {
+        return Some((query.source?, query.symbol));
     }
-    Some((DataSource::Binance, symbol.to_owned()))
-}
-
-fn source_for_slug(slug: &str) -> Option<DataSource> {
-    match slug.to_ascii_uppercase().as_str() {
-        "BINANCE" => Some(DataSource::Binance),
-        "COINBASE" => Some(DataSource::Coinbase),
-        "OKX" => Some(DataSource::Okx),
-        "KRAKEN" => Some(DataSource::Kraken),
-        "BYBIT" => Some(DataSource::Bybit),
-        "GATEIO" => Some(DataSource::Gate),
-        "MEXC" => Some(DataSource::Mexc),
-        "COINGECKO" => Some(DataSource::CoinGecko),
-        "DEXSCREENER" => Some(DataSource::DexScreener),
-        "ALPACA" => Some(DataSource::Alpaca),
-        "POLYMARKET" => Some(DataSource::Polymarket),
-        "KALSHI" => Some(DataSource::Kalshi),
-        "CMC" => Some(DataSource::CoinMarketCap),
-        _ => None,
-    }
+    let source = if symbol.trim().eq_ignore_ascii_case("BTCUSDT.P") {
+        DataSource::BinanceUsdM
+    } else {
+        DataSource::Binance
+    };
+    Some((source, symbol.to_owned()))
 }
 
 /// Compiles `source` and runs it once over every bar (historical phase) with the user's input
@@ -461,6 +447,12 @@ mod tests {
 
     #[test]
     fn security_symbols_resolve_to_a_source() {
+        for symbol in ["BTCUSDT.P", "BINANCE:BTCUSDT.P", "BINANCE_USDM:BTCUSDT.P"] {
+            assert_eq!(
+                resolve_symbol(symbol),
+                Some((DataSource::BinanceUsdM, "BTCUSDT.P".to_owned()))
+            );
+        }
         assert_eq!(
             resolve_symbol("ETHUSDT"),
             Some((DataSource::Binance, "ETHUSDT".to_owned()))

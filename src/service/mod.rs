@@ -183,6 +183,7 @@ pub trait MarketSource {
 pub fn for_source(source: DataSource) -> &'static dyn MarketSource {
     match source {
         DataSource::Binance => &market::binance::BINANCE,
+        DataSource::BinanceUsdM => &market::binance::BINANCE_USDM,
         DataSource::Coinbase => &market::coinbase::COINBASE,
         DataSource::Okx => &market::okx::OKX,
         DataSource::Kraken => &market::kraken::KRAKEN,

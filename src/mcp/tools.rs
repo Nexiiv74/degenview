@@ -131,6 +131,8 @@ pub fn required_permission(tool: &str) -> Option<Permission> {
 #[serde(rename_all = "lowercase")]
 pub enum McpSource {
     Binance,
+    #[serde(rename = "binance_usdm")]
+    BinanceUsdM,
     Coinbase,
     Okx,
     Kraken,
@@ -146,6 +148,7 @@ impl McpSource {
     pub(super) fn data_source(self) -> DataSource {
         match self {
             Self::Binance => DataSource::Binance,
+            Self::BinanceUsdM => DataSource::BinanceUsdM,
             Self::Coinbase => DataSource::Coinbase,
             Self::Okx => DataSource::Okx,
             Self::Kraken => DataSource::Kraken,

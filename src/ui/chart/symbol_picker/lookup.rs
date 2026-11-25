@@ -226,6 +226,7 @@ mod tests {
             names(&of("btc", Scope::All), Scope::All),
             [
                 "Binance",
+                "Binance USD-M",
                 "Coinbase",
                 "OKX",
                 "Kraken",
@@ -240,6 +241,10 @@ mod tests {
         assert_eq!(
             names(&of("coinbase:btc", Scope::All), Scope::All),
             ["Coinbase"]
+        );
+        assert_eq!(
+            names(&of("BINANCE:BTCUSDT.P", Scope::All), Scope::All),
+            ["Binance USD-M"]
         );
         assert_eq!(names(&of("btc", Scope::Stocks), Scope::Stocks), ["Alpaca"]);
     }

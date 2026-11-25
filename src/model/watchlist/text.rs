@@ -255,6 +255,16 @@ fn instrument_from(token: &str) -> Result<WatchlistInstrument, String> {
     };
 
     match source {
+        DataSource::BinanceUsdM => {
+            if !crate::model::market::source::binance_usdm_btc(&rest) {
+                return Err(crate::i18n::tr!(
+                    "Binance USD-M charts currently support BTCUSDT.P only."
+                )
+                .to_owned());
+            }
+            let symbol = source.display_symbol(&rest);
+            Ok(item(source, &symbol, &symbol, &symbol))
+        }
         DataSource::Binance | DataSource::Bybit | DataSource::Mexc => {
             let symbol = rest.to_uppercase();
             if !(3..=20).contains(&symbol.len()) || !symbol.chars().all(is_upper_alphanumeric) {
@@ -524,9 +534,23 @@ mod tests {
     }
 
     #[test]
+    fn tradingview_binance_perpetual_round_trips_as_a_distinct_market() {
+        let imported = parse("BINANCE:BTCUSDT\nBINANCE:btcusdt.p");
+        assert!(imported.skipped.is_empty());
+        let mut watchlist = Watchlist::new("BTC");
+        import_into(&mut watchlist, &imported).unwrap();
+        assert_eq!(
+            export(&watchlist),
+            "BINANCE:BTCUSDT\nBINANCE_USDM:BTCUSDT.P"
+        );
+        let reimported = parse(&export(&watchlist));
+        assert_eq!(instruments(&reimported), instruments(&imported));
+    }
+
+    #[test]
     fn unsupported_rows_are_reported_with_their_line_and_never_block_good_ones() {
         let parsed = parse(
-            "BINANCE:BTCUSDT\nCME:ES1!\nBTC\nBINANCE:BTCUSDT.P\nCOINBASE:BTCUSD\nPOLYMARKET:9\n\
+            "BINANCE:BTCUSDT\nCME:ES1!\nBTC\nBINANCE:ETHUSDT.P\nCOINBASE:BTCUSD\nPOLYMARKET:9\n\
              CMC:fear\nNASDAQ:TOOLONGX\nBINANCE:\n\nBINANCE:ETHUSDT",
         );
         assert_eq!(parsed.rows.len(), 2);

@@ -23,8 +23,9 @@ use std::time::{Duration, Instant};
 const SEARCH_DELAY: Duration = Duration::from_millis(300);
 
 /// The crypto sources the picker searches, in order.
-const CRYPTO_SOURCES: [DataSource; 9] = [
+const CRYPTO_SOURCES: [DataSource; 10] = [
     DataSource::Binance,
+    DataSource::BinanceUsdM,
     DataSource::Coinbase,
     DataSource::Okx,
     DataSource::Kraken,

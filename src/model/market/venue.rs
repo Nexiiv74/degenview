@@ -45,8 +45,14 @@ pub fn source_for_prefix(prefix: &str) -> Option<DataSource> {
 /// Splits `text` at its first colon into a venue and a symbol. `None` when there is no colon.
 pub fn parse(text: &str) -> Option<VenueQuery> {
     let (prefix, symbol) = text.split_once(':')?;
+    let source = match source_for_prefix(prefix) {
+        Some(DataSource::Binance) if symbol.trim().eq_ignore_ascii_case("BTCUSDT.P") => {
+            Some(DataSource::BinanceUsdM)
+        }
+        source => source,
+    };
     Some(VenueQuery {
-        source: source_for_prefix(prefix),
+        source,
         prefix: prefix.trim().to_uppercase(),
         symbol: symbol.trim().to_owned(),
     })

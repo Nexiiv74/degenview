@@ -81,6 +81,7 @@ pub const MAX_EDIT_MARKETS: usize = 100;
 pub fn source_id(source: DataSource) -> &'static str {
     match source {
         DataSource::Binance => "binance",
+        DataSource::BinanceUsdM => "binance_usdm",
         DataSource::Coinbase => "coinbase",
         DataSource::Okx => "okx",
         DataSource::Kraken => "kraken",
