@@ -280,6 +280,21 @@ pub fn start_for<T: Send + 'static>(
     lane(source).start(repaint, job)
 }
 
+/// Keep trade paging and archive inflation away from ordinary market loads.
+pub(crate) fn candle_lane(
+    source: crate::model::DataSource,
+    timeframe: crate::model::Timeframe,
+    older: bool,
+) -> &'static WorkQueue {
+    static TRADE_PAGES: WorkQueue = WorkQueue::new(2);
+    static ARCHIVE_PAGES: WorkQueue = WorkQueue::new(1);
+    if source.streams_trades_for(timeframe) {
+        if older { &ARCHIVE_PAGES } else { &TRADE_PAGES }
+    } else {
+        lane(source)
+    }
+}
+
 /// Runs a search of `source`'s provider for a picker, as [`WorkQueue::start`]: on that provider's
 /// lane when it has one, otherwise on the search workers.
 pub fn start_search<T: Send + 'static>(

@@ -49,6 +49,15 @@ const SLOW_RETRY_AFTER: Duration = Duration::from_secs(45);
 pub(super) trait OverlayBackend: Send + Sync + 'static {
     /// Runs `job` off the UI thread, on `source`'s lane of the work queue.
     fn submit(&self, source: DataSource, job: Box<dyn FnOnce() + Send>);
+    fn submit_candles(
+        &self,
+        source: DataSource,
+        _timeframe: Timeframe,
+        _older: bool,
+        job: Box<dyn FnOnce() + Send>,
+    ) {
+        self.submit(source, job);
+    }
     /// The newest candles, with the base candles of the newest one's bucket when a live feed
     /// folds them.
     fn klines(
@@ -71,6 +80,16 @@ pub(super) trait OverlayBackend: Send + Sync + 'static {
 struct ServiceBackend;
 
 impl OverlayBackend for ServiceBackend {
+    fn submit_candles(
+        &self,
+        source: DataSource,
+        timeframe: Timeframe,
+        older: bool,
+        job: Box<dyn FnOnce() + Send>,
+    ) {
+        service::work_queue::candle_lane(source, timeframe, older).submit(job);
+    }
+
     fn submit(&self, source: DataSource, job: Box<dyn FnOnce() + Send>) {
         service::work_queue::submit_for(source, job);
     }
@@ -382,15 +401,8 @@ impl OverlayHub {
         let active = self.series.values().filter(|series| series.shown()).count();
         // First loads, then older pages, then refreshes; within each, the longest waiting first.
         let mut due: Vec<(u8, Option<Instant>, String)> = Vec::new();
-        for (key, series) in &mut self.series {
+        for (key, series) in &self.series {
             if !series.shown() || series.busy() || series.blocked() {
-                continue;
-            }
-            if series.instrument.source.streams_trades_for(timeframe) {
-                if series.status == OverlayStatus::Queued {
-                    series.status = OverlayStatus::Loading;
-                    self.version += 1;
-                }
                 continue;
             }
             if series.retry_at.is_some_and(|at| now < at) {
@@ -401,7 +413,13 @@ impl OverlayHub {
                 Some(_) if wants_older(series, timeframe, now) => 1,
                 Some(at)
                     if now.duration_since(at)
-                        >= refresh_after(series.instrument.source, active) =>
+                        >= refresh_after(series.instrument.source, active).max(
+                            if series.instrument.source.streams_trades_for(timeframe) {
+                                Duration::from_secs(45)
+                            } else {
+                                Duration::ZERO
+                            },
+                        ) =>
                 {
                     2
                 }
@@ -572,11 +590,18 @@ fn request_newest(
 ) {
     let (sender, receiver) = mpsc::channel();
     let instrument = series.instrument.clone();
+    let limit = if instrument.source.streams_trades_for(timeframe) && !series.candles.is_empty() {
+        100
+    } else {
+        CANDLE_LIMIT
+    };
     let generation = series.generation.fetch_add(1, Ordering::AcqRel) + 1;
     let current: Weak<AtomicU64> = Arc::downgrade(&series.generation);
     let (worker, repaint) = (backend.clone(), ctx.clone());
-    backend.submit(
+    backend.submit_candles(
         instrument.source,
+        timeframe,
+        false,
         Box::new(move || {
             if !current
                 .upgrade()
@@ -584,12 +609,7 @@ fn request_newest(
             {
                 return;
             }
-            let result = worker.klines(
-                instrument.source,
-                &instrument.symbol,
-                timeframe,
-                CANDLE_LIMIT,
-            );
+            let result = worker.klines(instrument.source, &instrument.symbol, timeframe, limit);
             let _ = sender.send(result);
             repaint.request_repaint();
         }),
@@ -610,8 +630,10 @@ fn request_older(
     let (sender, receiver) = mpsc::channel();
     let instrument = series.instrument.clone();
     let (worker, repaint) = (backend.clone(), ctx.clone());
-    backend.submit(
+    backend.submit_candles(
         instrument.source,
+        timeframe,
+        true,
         Box::new(move || {
             let page = worker.page(instrument.source, &instrument.symbol, timeframe, end);
             let _ = sender.send(page);
@@ -635,6 +657,13 @@ fn receive_fetch(series: &mut Series, timeframe: Timeframe, now: Instant) -> boo
     };
     series.inbox = None;
     match result {
+        Ok(fresh) if series.instrument.source.streams_trades_for(timeframe) => {
+            let mut candles = (*series.candles).clone();
+            market::history::merge_completed(&mut candles, fresh.candles);
+            series.set_candles(candles);
+            series.status = OverlayStatus::Ready;
+            series.retry_at = None;
+        }
         Ok(fresh) => {
             let live_open = series
                 .live

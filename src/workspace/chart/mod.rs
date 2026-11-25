@@ -343,22 +343,20 @@ impl Chart {
         if !self.is_market() {
             return;
         }
-        if self.source.streams_trades_for(timeframe) {
-            self.fetch_generation.fetch_add(1, Ordering::AcqRel);
-            self.inbox = None;
-            self.error = None;
-            self.loading = self.candles.is_empty();
-            return;
-        }
         let (sender, receiver) = mpsc::channel();
         let symbol = self.symbol.clone();
         let source = self.source;
         let choices = self.pm_series.clone();
+        let limit = if source.streams_trades_for(timeframe) && !self.candles.is_empty() {
+            100
+        } else {
+            CANDLE_LIMIT
+        };
         let repaint = ctx.clone();
 
         let generation = self.fetch_generation.fetch_add(1, Ordering::AcqRel) + 1;
         let current = Arc::downgrade(&self.fetch_generation);
-        service::work_queue::submit_for(source, move || {
+        service::work_queue::candle_lane(source, timeframe, false).submit(move || {
             if !current
                 .upgrade()
                 .is_some_and(|state| state.load(Ordering::Acquire) == generation)
@@ -366,12 +364,10 @@ impl Chart {
                 return;
             }
             let result = if choices.is_empty() {
-                service::fetch_klines_live(source, &symbol, timeframe, CANDLE_LIMIT).map(|live| {
-                    Fetched {
-                        candles: live.candles,
-                        bars: live.bars,
-                        series: Vec::new(),
-                    }
+                service::fetch_klines_live(source, &symbol, timeframe, limit).map(|live| Fetched {
+                    candles: live.candles,
+                    bars: live.bars,
+                    series: Vec::new(),
                 })
             } else {
                 Fetched::from_choices(service::fetch_choices(
@@ -459,7 +455,7 @@ impl Chart {
         let (source, symbol) = (self.source, self.symbol.clone());
         let repaint = ctx.clone();
         let asked = symbol.clone();
-        service::work_queue::submit_for(source, move || {
+        service::work_queue::candle_lane(source, timeframe, true).submit(move || {
             let page = service::fetch_klines_range(
                 source,
                 &asked,
@@ -523,6 +519,13 @@ impl Chart {
         self.loading = false;
         self.inbox = None;
         match result {
+            Ok(fetched) if self.source.streams_trades_for(timeframe) => {
+                market::history::merge_completed(&mut self.candles, fetched.candles);
+                self.error = None;
+                if let Some(bar) = self.candles.last() {
+                    self.last_data_ms = Some(self.last_data_ms.unwrap_or(0).max(bar.close_time));
+                }
+            }
             Ok(fetched) => {
                 let live_open = self.live.and_then(|mark| mark.guard_for(self.last_fetch));
                 let fresh = self.live_fold.merge_fetched(

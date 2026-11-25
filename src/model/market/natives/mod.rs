@@ -246,10 +246,10 @@ impl DataSource {
     /// 180 days: a page of its base candles that already spans that has no older one.
     pub fn supports_older_history(self, timeframe: Timeframe) -> bool {
         match self {
-            Self::BinanceUsdM => !self.streams_trades_for(timeframe),
             // Kraken's OHLC answers the newest 720 candles whatever is asked: the chart's first
             // 500 leave the rest for the first older page, and a second page is empty.
             Self::Binance
+            | Self::BinanceUsdM
             | Self::Coinbase
             | Self::Okx
             | Self::Kraken

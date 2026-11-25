@@ -571,7 +571,10 @@ impl ChartWorkspace {
             chart.receive_fetch(timeframe);
             chart.receive_older(timeframe);
             chart.request_older(timeframe, &ctx);
-            if !chart.source.streams_trades_for(timeframe) && chart.refresh_due() {
+            let seconds = chart.source.streams_trades_for(timeframe);
+            if chart.refresh_due()
+                && (!seconds || chart.last_fetch.elapsed() >= std::time::Duration::from_secs(45))
+            {
                 chart.fetch(timeframe, &ctx);
             }
         }

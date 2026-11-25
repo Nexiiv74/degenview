@@ -1,3 +1,5 @@
+mod seconds;
+
 use super::candles::plan;
 use super::catalog::Catalog;
 use super::search_rank::normalize;
@@ -60,6 +62,9 @@ impl MarketSource for Binance {
         timeframe: Timeframe,
         limit: u32,
     ) -> Result<Vec<Kline>, ProviderError> {
+        if self.source.streams_trades_for(timeframe) {
+            return seconds::newest(symbol, timeframe, limit as usize);
+        }
         let plan = plan(self.source, timeframe)?;
         let requested = plan.base_count(limit as usize);
         if requested > MAX_PER_REQUEST {
@@ -84,6 +89,9 @@ impl MarketSource for Binance {
         end_ms: i64,
         max: usize,
     ) -> Result<Vec<Kline>, ProviderError> {
+        if self.source.streams_trades_for(timeframe) {
+            return seconds::older(symbol, timeframe, start_ms, end_ms, max);
+        }
         const PAGE: usize = MAX_PER_REQUEST;
         // Pages are fetched side by side: their start times follow from the interval alone.
         const PARALLEL: usize = 8;
@@ -341,13 +349,7 @@ mod tests {
         assert!(DataSource::Binance.serves(seconds));
         assert!(source.serves(seconds));
         assert!(source.streams_trades_for(seconds));
-        assert!(!source.supports_older_history(seconds));
-        assert!(
-            BINANCE_USDM
-                .fetch_klines("BTCUSDT.P", seconds, 4)
-                .unwrap_err()
-                .is_unsupported_interval()
-        );
+        assert!(source.supports_older_history(seconds));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::format;
 use crate::i18n::tr;
-use crate::model::market::history::trim_live;
+use crate::model::market::history::{merge_completed, trim_live};
 use crate::model::market::live::{CandleUpdate, apply_live, remove_candle};
 use crate::model::{InstrumentId, Timeframe};
 use crate::service::market::live::LiveFeed;
@@ -30,8 +30,14 @@ impl PreviewState {
         }
         let market = self.market.clone();
         let timeframe = self.timeframe;
-        self.inbox = Some(work_queue::start_for(market.source, Some(ctx), move || {
-            service::fetch_klines(market.source, &market.ticker, timeframe, CANDLE_LIMIT)
+        let limit = if market.source.streams_trades_for(timeframe) && !self.candles.is_empty() {
+            100
+        } else {
+            CANDLE_LIMIT
+        };
+        let lane = work_queue::candle_lane(market.source, timeframe, false);
+        self.inbox = Some(lane.start(Some(ctx), move || {
+            service::fetch_klines(market.source, &market.ticker, timeframe, limit)
         }));
         self.loading = true;
         self.last_fetch = Some(Instant::now());
@@ -86,7 +92,12 @@ impl PreviewState {
         self.inbox = None;
         self.loading = false;
         match result {
-            Ok(candles) => {
+            Ok(mut candles) => {
+                if self.market.source.streams_trades_for(self.timeframe) {
+                    let mut held = std::mem::take(&mut self.candles);
+                    merge_completed(&mut held, candles);
+                    candles = held;
+                }
                 self.set_candles(candles);
                 self.error = None;
             }

@@ -131,6 +131,34 @@ pub fn prepend(held: &mut Vec<Kline>, mut page: Vec<Kline>) -> usize {
     added
 }
 
+/// Merge completed trade-derived candles without erasing the live tail or earlier archive pages.
+pub(crate) fn merge_completed(held: &mut Vec<Kline>, fresh: Vec<Kline>) {
+    let Some(first) = fresh.first() else { return };
+    let tail = held.partition_point(|bar| bar.open_time < first.open_time);
+    let mut held_tail = held
+        .drain(tail..)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .peekable();
+    for bar in fresh {
+        while held_tail
+            .peek()
+            .is_some_and(|old| old.open_time < bar.open_time)
+        {
+            held.push(held_tail.next().expect("peeked"));
+        }
+        if held_tail
+            .peek()
+            .is_some_and(|old| old.open_time == bar.open_time)
+        {
+            held_tail.next();
+        }
+        held.push(bar);
+    }
+    held.extend(held_tail);
+    trim_live(held);
+}
+
 /// What a refresh leaves on the chart: the candles it brought, with the older ones the chart
 /// already held in front. Without loaded history the refresh simply replaces them.
 pub fn with_older(held: &[Kline], mut fresh: Vec<Kline>, keep_older: bool) -> Vec<Kline> {

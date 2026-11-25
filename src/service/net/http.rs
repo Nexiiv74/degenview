@@ -149,6 +149,25 @@ pub fn get_bytes(url: &str, max_body_bytes: u64) -> Result<Vec<u8>, Error> {
     )
 }
 
+/// Large public data archives use their own timeout and the current application proxy.
+pub(crate) fn get_archive_bytes(url: &str, max_body_bytes: u64) -> Result<Vec<u8>, Error> {
+    static ARCHIVE_AGENT: LazyLock<FollowingAgent> = LazyLock::new(|| {
+        FollowingAgent::new(|config| {
+            config
+                .timeout_global(Some(Duration::from_secs(90)))
+                .http_status_as_error(false)
+        })
+    });
+    fetch(
+        &*ARCHIVE_AGENT,
+        url,
+        &[],
+        Retry::Never,
+        std::thread::sleep,
+        |body| body.with_config().limit(max_body_bytes).read_to_vec(),
+    )
+}
+
 /// The request loop shared by every GET: retry classification and `Retry-After` live here, the
 /// caller only says how to read a successful body.
 fn fetch<T>(
