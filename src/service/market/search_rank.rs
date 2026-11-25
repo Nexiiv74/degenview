@@ -100,7 +100,7 @@ impl Key {
 /// other quotes last.
 fn quote_order(result: &SearchResult) -> usize {
     let home = match result.source {
-        DataSource::Binance => Some("USDT"),
+        DataSource::Binance | DataSource::BinanceUsdM => Some("USDT"),
         DataSource::Coinbase => Some("USD"),
         DataSource::Okx => Some("USDT"),
         DataSource::Kraken => Some("USD"),

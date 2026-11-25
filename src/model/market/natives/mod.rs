@@ -30,8 +30,8 @@ const fn native(count: u16, unit: TimeUnit) -> Timeframe {
     }
 }
 
-/// Binance's kline intervals, its `1s` among them (spot markets only, which is all that is
-/// listed). Its `3d` is left out: Binance counts those from a day of its own
+/// Binance's spot kline intervals. USD-M uses the same list starting at `1m`. Its
+/// `3d` is left out: Binance counts those from a day of its own
 /// (not a multiple of three since 1970-01-01), so they would not match every other source's.
 /// Weeks start on Monday, as here.
 const BINANCE: [Timeframe; 15] = [
@@ -193,6 +193,7 @@ impl DataSource {
     pub fn natives(self) -> &'static [Timeframe] {
         match self {
             Self::Binance => &BINANCE,
+            Self::BinanceUsdM => &BINANCE[1..],
             Self::Coinbase => &COINBASE,
             Self::Okx => &OKX,
             Self::Kraken => &KRAKEN,
@@ -216,6 +217,7 @@ impl DataSource {
     pub fn serves(self, timeframe: Timeframe) -> bool {
         match self {
             Self::Binance
+            | Self::BinanceUsdM
             | Self::Coinbase
             | Self::Okx
             | Self::Kraken
@@ -239,6 +241,7 @@ impl DataSource {
             // Kraken's OHLC answers the newest 720 candles whatever is asked: the chart's first
             // 500 leave the rest for the first older page, and a second page is empty.
             Self::Binance
+            | Self::BinanceUsdM
             | Self::Coinbase
             | Self::Okx
             | Self::Kraken

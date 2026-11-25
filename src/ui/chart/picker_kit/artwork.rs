@@ -74,6 +74,7 @@ pub(crate) fn result_icon(ui: &Ui, rect: Rect, result: &SearchResult) {
     let base = base_symbol(result);
     match result.source {
         DataSource::Binance
+        | DataSource::BinanceUsdM
         | DataSource::Coinbase
         | DataSource::Okx
         | DataSource::Kraken

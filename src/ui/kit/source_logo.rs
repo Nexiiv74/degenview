@@ -6,7 +6,9 @@ use eframe::egui::{self, ImageSource, Rect, Ui, Vec2};
 
 fn source(source: DataSource) -> ImageSource<'static> {
     match source {
-        DataSource::Binance => egui::include_image!("../../../assets/source_logos/binance.svg"),
+        DataSource::Binance | DataSource::BinanceUsdM => {
+            egui::include_image!("../../../assets/source_logos/binance.svg")
+        }
         DataSource::Coinbase => egui::include_image!("../../../assets/source_logos/coinbase.svg"),
         DataSource::Okx => egui::include_image!("../../../assets/source_logos/okx.svg"),
         DataSource::Kraken => egui::include_image!("../../../assets/source_logos/kraken.svg"),

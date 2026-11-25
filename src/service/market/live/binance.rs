@@ -5,9 +5,24 @@ use crate::service::net::ws::{Keepalive, Session};
 use serde_json::Value;
 use std::time::Duration;
 
-const HOST: &str = "stream.binance.com";
+const SPOT_HOST: &str = "stream.binance.com";
+const USD_M_HOST: &str = "fstream.binance.com";
 
 pub(super) fn session(symbols: &[String], base: Timeframe) -> Session {
+    combined_session(SPOT_HOST, "/stream", symbols, base)
+}
+
+pub(super) fn usdm_session(symbols: &[String], base: Timeframe) -> Option<Session> {
+    let symbol = symbols.iter().find(|symbol| symbol.as_str() == "BTCUSDT")?;
+    Some(combined_session(
+        USD_M_HOST,
+        "/market/stream",
+        std::slice::from_ref(symbol),
+        base,
+    ))
+}
+
+fn combined_session(host: &str, path: &str, symbols: &[String], base: Timeframe) -> Session {
     let interval = base.interval();
     let streams = symbols
         .iter()
@@ -15,8 +30,8 @@ pub(super) fn session(symbols: &[String], base: Timeframe) -> Session {
         .collect::<Vec<_>>()
         .join("/");
     Session {
-        url: format!("wss://{HOST}/stream?streams={streams}"),
-        host: HOST.to_owned(),
+        url: format!("wss://{host}{path}?streams={streams}"),
+        host: host.to_owned(),
         port: 443,
         subscribe: Vec::new(),
         max_data_silence: Duration::from_secs(60),
@@ -65,6 +80,65 @@ mod tests {
             "wss://stream.binance.com/stream?streams=btcusdt@kline_1h/ethusdt@kline_1h"
         );
         assert!(session.subscribe.is_empty());
+    }
+
+    #[test]
+    fn usdm_streams_use_the_futures_market_route_and_only_the_supported_contract() {
+        let symbols = [
+            "BTCUSDT".to_owned(),
+            "BTCUSDT".to_owned(),
+            "ETHUSDT".to_owned(),
+        ];
+        let session = usdm_session(&symbols, Timeframe::MINUTE_1).unwrap();
+        assert_eq!(
+            session.url,
+            "wss://fstream.binance.com/market/stream?streams=btcusdt@kline_1m"
+        );
+        assert!(usdm_session(&symbols[2..], Timeframe::MINUTE_1).is_none());
+    }
+
+    #[test]
+    #[ignore = "needs the Binance public endpoints"]
+    fn usdm_live_chart_has_real_klines_and_older_history() {
+        use crate::model::{DataSource, InstrumentId};
+        use crate::service::net::proxy::{AppliedProxy, ProxyConfig};
+        use crate::service::{fetch_klines, fetch_klines_range, market::live::LiveFeed};
+        use std::time::Instant;
+
+        let _proxy = AppliedProxy::new(ProxyConfig::default());
+        let instrument = InstrumentId::new(DataSource::BinanceUsdM, "BTCUSDT.P");
+        let id = instrument.api_symbol();
+        let timeframe = Timeframe::MINUTE_1;
+        let feed = LiveFeed::connect(
+            instrument.source,
+            vec![id.clone()],
+            timeframe,
+            eframe::egui::Context::default(),
+        )
+        .expect("futures feed");
+        let bars = fetch_klines(instrument.source, &id, timeframe, 4).expect("recent bars");
+        assert_eq!(bars.len(), 4);
+        let end = bars[0].open_time;
+        let older = fetch_klines_range(instrument.source, &id, timeframe, end - 240_000, end, 4)
+            .expect("older page");
+        assert_eq!(older.len(), 4);
+        assert_eq!(older[3].close_time + 1, end);
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some((symbol, candle)) = feed.inbox.drain().pop() {
+                assert_eq!(symbol, id);
+                assert!(candle.close > 0.0);
+                assert!(candle.high >= candle.close && candle.low <= candle.close);
+                assert_eq!(candle.close_time - candle.open_time, 59_999);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no futures candle from the socket"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]

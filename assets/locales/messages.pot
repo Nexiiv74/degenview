@@ -20625,3 +20625,11 @@ msgstr ""
 msgctxt "what a link syncs, in a list"
 msgid "time"
 msgstr ""
+
+#: src/model/watchlist/text.rs src/service/market/binance.rs
+msgid "Binance USD-M charts currently support BTCUSDT.P only."
+msgstr ""
+
+#: src/ui/chart/symbol_picker/search.rs
+msgid "Perpetual"
+msgstr ""

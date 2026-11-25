@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum DataSource {
     Binance,
+    BinanceUsdM,
     Coinbase,
     Okx,
     Kraken,
@@ -25,6 +26,7 @@ impl DataSource {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Binance => "Binance",
+            Self::BinanceUsdM => "Binance USD-M",
             Self::Coinbase => "Coinbase",
             Self::Okx => "OKX",
             Self::Kraken => "Kraken",
@@ -44,6 +46,7 @@ impl DataSource {
     pub fn watchlist_slug(self) -> &'static str {
         match self {
             Self::Binance => "BINANCE",
+            Self::BinanceUsdM => "BINANCE_USDM",
             Self::Coinbase => "COINBASE",
             Self::Okx => "OKX",
             Self::Kraken => "KRAKEN",
@@ -61,8 +64,9 @@ impl DataSource {
 
     /// The source a `watchlist_slug` names, in any case.
     pub fn from_watchlist_slug(slug: &str) -> Option<Self> {
-        const ALL: [DataSource; 13] = [
+        const ALL: [DataSource; 14] = [
             DataSource::Binance,
+            DataSource::BinanceUsdM,
             DataSource::Coinbase,
             DataSource::Okx,
             DataSource::Kraken,
@@ -82,8 +86,9 @@ impl DataSource {
 
     /// The sources whose forming candle a chart takes from a socket instead of waiting for the
     /// next refresh.
-    pub const CANDLE_STREAMS: [DataSource; 6] = [
+    pub const CANDLE_STREAMS: [DataSource; 7] = [
         DataSource::Binance,
+        DataSource::BinanceUsdM,
         DataSource::Okx,
         DataSource::Kraken,
         DataSource::Bybit,
@@ -116,6 +121,7 @@ impl DataSource {
         matches!(
             self,
             Self::Binance
+                | Self::BinanceUsdM
                 | Self::Coinbase
                 | Self::Okx
                 | Self::Kraken
@@ -144,7 +150,9 @@ impl DataSource {
     pub fn display_symbol(self, symbol: &str) -> String {
         let raw = symbol.trim();
         match self {
-            Self::Binance
+            Self::BinanceUsdM if binance_usdm_btc(symbol) => "BTCUSDT.P".to_owned(),
+            Self::BinanceUsdM
+            | Self::Binance
             | Self::Coinbase
             | Self::Okx
             | Self::Kraken
@@ -165,6 +173,7 @@ impl DataSource {
         let upper = symbol.trim().to_uppercase();
         let head = upper.split(['/', '-', ' ', '_']).next().unwrap_or(&upper);
         match self {
+            Self::BinanceUsdM if binance_usdm_btc(symbol) => "BTC",
             // A one-letter "base" is a bare wrapped asset (WBTC, WETH), not a pair.
             Self::Binance | Self::Bybit => split_binance_pair(head)
                 .map(|(base, _)| base)
@@ -184,6 +193,7 @@ impl DataSource {
     pub fn quote_asset(self, symbol: &str) -> Option<String> {
         let upper = symbol.trim().to_uppercase();
         match self {
+            Self::BinanceUsdM if binance_usdm_btc(symbol) => Some("USDT".to_owned()),
             Self::Binance | Self::Bybit => {
                 split_binance_pair(&upper).map(|(_, quote)| quote.to_owned())
             }
@@ -206,6 +216,12 @@ impl DataSource {
             _ => None,
         }
     }
+}
+
+/// The only USD-M contract exposed by the chart source.
+pub(crate) fn binance_usdm_btc(symbol: &str) -> bool {
+    let upper = symbol.trim().to_ascii_uppercase().replace(['/', '-'], "");
+    matches!(upper.as_str(), "BTCUSDT" | "BTCUSDT.P")
 }
 
 /// Kraken's own spelling of an asset is the legacy one (`XBT`, `XDG`) in some places; its APIs take

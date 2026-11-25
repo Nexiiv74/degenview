@@ -98,6 +98,7 @@ impl QuoteProvider for LiveProvider {
         }
         match source {
             DataSource::Binance => binance(requests).map(Outcome::from_quotes),
+            DataSource::BinanceUsdM => binance_usdm(requests).map(Outcome::from_quotes),
             DataSource::Coinbase => Ok(coinbase(requests)),
             DataSource::Okx => okx(requests).map(Outcome::from_quotes),
             DataSource::Kraken => kraken(requests).map(Outcome::from_quotes),
@@ -188,6 +189,25 @@ pub fn binance_url(requests: &[QuoteRequest]) -> String {
 fn binance(requests: &[QuoteRequest]) -> Result<HashMap<String, SourceQuote>, QuoteFailure> {
     let body = get(DataSource::Binance, &binance_url(requests), &[])?;
     parse_binance(&body, requests)
+}
+
+fn binance_usdm(requests: &[QuoteRequest]) -> Result<HashMap<String, SourceQuote>, QuoteFailure> {
+    if !requests.iter().any(|request| request.symbol == "BTCUSDT") {
+        return Ok(HashMap::new());
+    }
+    let base = crate::service::market::binance::USD_M_REST;
+    let body = get(
+        DataSource::BinanceUsdM,
+        &format!("{base}/ticker/24hr?symbol=BTCUSDT"),
+        &[],
+    )?;
+    let value = json(&body)?;
+    if !value.is_object() {
+        return Err(QuoteFailure::Failed(
+            tr!("Unexpected Binance response").to_owned(),
+        ));
+    }
+    Ok(binance_quotes(std::slice::from_ref(&value), requests))
 }
 
 /// How many answers in a row may fail before an adapter stops asking: the endpoint is
@@ -446,9 +466,14 @@ pub fn parse_binance(
     requests: &[QuoteRequest],
 ) -> Result<HashMap<String, SourceQuote>, QuoteFailure> {
     let value = json(body)?;
-    let tickers: HashMap<String, &Value> = value
+    let rows = value
         .as_array()
-        .ok_or_else(|| QuoteFailure::Failed(tr!("Unexpected Binance response").to_owned()))?
+        .ok_or_else(|| QuoteFailure::Failed(tr!("Unexpected Binance response").to_owned()))?;
+    Ok(binance_quotes(rows, requests))
+}
+
+fn binance_quotes(rows: &[Value], requests: &[QuoteRequest]) -> HashMap<String, SourceQuote> {
+    let tickers: HashMap<String, &Value> = rows
         .iter()
         .filter_map(|ticker| Some((ticker.get("symbol")?.as_str()?.to_uppercase(), ticker)))
         .collect();
@@ -478,7 +503,7 @@ pub fn parse_binance(
         }
         quotes.insert(request.symbol.clone(), quote);
     }
-    Ok(quotes)
+    quotes
 }
 
 /// `/ticker/24hr`: every spot market in one answer (its `symbols` parameter is ignored); the

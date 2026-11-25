@@ -35,6 +35,13 @@ impl InstrumentId {
     /// USDT); Kraken's are `BASE/QUOTE` (USD) in the common tickers, never the legacy `XBT`.
     pub fn api_symbol(&self) -> String {
         match self.source {
+            DataSource::BinanceUsdM => {
+                if super::source::binance_usdm_btc(&self.symbol) {
+                    "BTCUSDT".to_owned()
+                } else {
+                    self.symbol.to_ascii_uppercase()
+                }
+            }
             DataSource::Mexc => {
                 let upper = self.symbol.to_uppercase().replace(['/', '-', '_', ' '], "");
                 // Its own quotes (`USD1`, `USDE`), and a one-letter base is a real asset (`S`).
@@ -106,6 +113,7 @@ impl InstrumentId {
     fn normalized(symbol: &str, source: DataSource) -> String {
         match source {
             DataSource::Binance
+            | DataSource::BinanceUsdM
             | DataSource::Bybit
             | DataSource::Mexc
             | DataSource::Coinbase
@@ -133,6 +141,21 @@ mod tests {
 
         let coingecko = InstrumentId::new(DataSource::CoinGecko, "Bitcoin");
         assert_eq!(coingecko.key(), "COINGECKO:bitcoin");
+    }
+
+    #[test]
+    fn binance_usdm_identity_cannot_collide_with_spot() {
+        let spot = InstrumentId::new(DataSource::Binance, "BTCUSDT");
+        let futures = InstrumentId::new(DataSource::BinanceUsdM, "btcusdt.p");
+        assert_eq!(futures.api_symbol(), spot.api_symbol());
+        assert_ne!(futures.key(), spot.key());
+        assert!(!futures.is_same_market(&spot));
+        assert_eq!(futures.key(), "BINANCE_USDM:BTCUSDT");
+        assert_eq!(InstrumentId::rekey(&futures.key()), Some(futures.key()));
+        assert_eq!(
+            futures.source.display_symbol(&futures.api_symbol()),
+            "BTCUSDT.P"
+        );
     }
 
     #[test]

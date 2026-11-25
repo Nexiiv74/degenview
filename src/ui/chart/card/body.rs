@@ -39,14 +39,19 @@ pub(super) fn symbol_info(symbol: &str, source: DataSource, chart_type: ChartTyp
     SymbolInfo {
         ticker: symbol.to_owned(),
         ticker_id: format!("{}:{}", source.watchlist_slug(), symbol),
-        currency: "USD".to_owned(),
+        currency: if source == DataSource::BinanceUsdM {
+            "USDT"
+        } else {
+            "USD"
+        }
+        .to_owned(),
         kind: if source == DataSource::Alpaca {
             "stock"
         } else {
             "crypto"
         }
         .to_owned(),
-        base_currency: None,
+        base_currency: (source == DataSource::BinanceUsdM).then(|| "BTC".to_owned()),
         chart: chart_type.kind(),
     }
 }

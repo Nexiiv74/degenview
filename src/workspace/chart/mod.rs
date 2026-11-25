@@ -197,6 +197,7 @@ impl Chart {
     pub(super) fn picker_query(&self) -> String {
         match self.source {
             DataSource::Binance
+            | DataSource::BinanceUsdM
             | DataSource::Coinbase
             | DataSource::Okx
             | DataSource::Kraken

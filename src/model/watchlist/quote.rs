@@ -19,6 +19,7 @@ impl ChangeBasis {
     pub fn for_source(source: DataSource) -> Self {
         match source {
             DataSource::Binance
+            | DataSource::BinanceUsdM
             | DataSource::Coinbase
             | DataSource::Okx
             | DataSource::Kraken
@@ -171,6 +172,7 @@ impl WatchlistQuote {
 pub fn refresh_interval_secs(source: DataSource) -> u64 {
     match source {
         DataSource::Binance
+        | DataSource::BinanceUsdM
         | DataSource::Coinbase
         | DataSource::Okx
         | DataSource::Kraken
@@ -189,6 +191,7 @@ pub fn refresh_interval_secs(source: DataSource) -> u64 {
 pub fn maximum_age_secs(source: DataSource) -> i64 {
     match source {
         DataSource::Binance
+        | DataSource::BinanceUsdM
         | DataSource::Okx
         | DataSource::Kraken
         | DataSource::Bybit

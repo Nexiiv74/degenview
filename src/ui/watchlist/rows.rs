@@ -51,6 +51,7 @@ fn fitted(
 pub fn icon_base_symbol(item: &WatchlistInstrument) -> String {
     let symbol = &item.instrument.symbol;
     match item.instrument.source {
+        DataSource::BinanceUsdM => item.instrument.source.base_asset(symbol),
         DataSource::Binance | DataSource::Bybit | DataSource::Mexc => {
             let upper = symbol.to_uppercase();
             ["USDT", "USDC", "BUSD", "FDUSD", "USD"]

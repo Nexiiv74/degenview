@@ -107,6 +107,27 @@ mod tests {
     use crate::workspace::test_support::{candle, empty_workspace};
 
     #[test]
+    fn usdm_updates_only_the_perpetual_chart_even_with_spot_on_the_same_workspace() {
+        let mut workspace = empty_workspace(1);
+        workspace.timeframe = Timeframe::MINUTE_1;
+        workspace
+            .charts
+            .push(Chart::blank(1, "BTCUSDT", DataSource::Binance));
+        workspace
+            .charts
+            .push(Chart::blank(2, "BTCUSDT.P", DataSource::BinanceUsdM));
+        workspace.apply_live_kline(
+            DataSource::BinanceUsdM,
+            Timeframe::MINUTE_1,
+            "BTCUSDT",
+            candle(1, 5.0),
+            Instant::now(),
+        );
+        assert!(workspace.charts[0].candles.is_empty());
+        assert_eq!(workspace.charts[1].candles[0].close, 5.0);
+    }
+
+    #[test]
     fn every_chart_of_the_symbol_takes_the_live_bar() {
         let mut workspace = empty_workspace(1);
         for id in 1..=2 {
