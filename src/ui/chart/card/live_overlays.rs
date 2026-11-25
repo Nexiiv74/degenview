@@ -4,6 +4,7 @@
 use super::frame::{FrameData, FrameLayout, Overlays, PaneSlot, paint_pane_title};
 use super::overlays::OverlayFrame;
 use super::*;
+use crate::i18n::tr;
 use crate::ui::chart::scale_menu;
 use crate::ui::paper::chart_trading::{MarkerMenu, PaperOverlayAction};
 use crate::ui::{kit, theme};
@@ -101,6 +102,20 @@ impl Overlays for LiveOverlays<'_> {
     }
 
     fn pane(&mut self, painter: &egui::Painter, layout: &FrameLayout, slot: &PaneSlot) {
+        if slot.pending && !slot.collapsed {
+            let area = Rect::from_min_max(
+                slot.rect.min,
+                Pos2::new(layout.plot.right(), slot.rect.bottom()),
+            );
+            if area.height() >= 64.0 {
+                kit::loading::message(self.ui, area, tr!("Loading…"));
+            } else if area.height() >= 16.0 {
+                kit::loading::LoadingIndicator::new().size(16.0).paint_at(
+                    self.ui,
+                    Rect::from_center_size(area.center(), Vec2::splat(16.0)),
+                );
+            }
+        }
         let hovered = self.ui.rect_contains_pointer(slot.rect);
         paint_pane_title(painter, layout, slot, hovered);
         if let Some(action) = buttons::pane(

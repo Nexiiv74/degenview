@@ -13,6 +13,7 @@ use crate::ui::paper::chart_trading::{MarkerMenu, PaperOverlayAction};
 pub(super) struct BodyArgs<'a> {
     pub symbol: &'a str,
     pub candles: &'a [Kline],
+    pub loading_history: bool,
     pub error: Option<&'a ProviderError>,
     pub scale_mode: PriceScaleMode,
     pub source: DataSource,
@@ -99,6 +100,9 @@ impl ChartCard {
             return true;
         }
         if args.candles.is_empty() {
+            if args.loading_history && self.runs_scripts() {
+                crate::ui::kit::loading::message(ui, rect, tr!("Loading…"));
+            }
             return true;
         }
         if args.source == DataSource::CoinMarketCap
@@ -336,7 +340,7 @@ impl ChartCard {
         ui: &mut egui::Ui,
         symbol: &str,
         candles: &[Kline],
-        loading: bool,
+        loading_history: bool,
         error: Option<&ProviderError>,
         scale_mode: PriceScaleMode,
         source: DataSource,
@@ -350,6 +354,7 @@ impl ChartCard {
         let args = BodyArgs {
             symbol,
             candles,
+            loading_history,
             error,
             scale_mode,
             source,
@@ -357,7 +362,6 @@ impl ChartCard {
             crosshair,
             chart_id,
         };
-        let _ = loading;
         let pointer = self.body_inner(ui, &args, drawing, replay);
         self.end_sync_frame(source, candles);
         if let (Some(error), false, Some(rect)) = (error, candles.is_empty(), pointer.rect) {
@@ -443,8 +447,18 @@ impl ChartCard {
         let symbol_info = body::symbol_info(symbol, source, chart_type);
         let source_bar_seconds =
             body::source_bar_seconds(candles, self.timeframe, constructed.is_some());
-        let placed = self.pine_outputs(ui.ctx(), &symbol_info, bars, source_bar_seconds);
+        let placed = if args.loading_history {
+            Vec::new()
+        } else {
+            self.pine_outputs(ui.ctx(), &symbol_info, bars, source_bar_seconds)
+        };
         let outputs = frame::split_forced_overlays(placed, line);
+        let pending_panes: Vec<_> = self
+            .instances
+            .iter()
+            .filter(|instance| instance.visible && self.pine.pane_pending(instance.id))
+            .map(|instance| instance.id)
+            .collect();
         self.feed_table(
             bars,
             chart_type,
@@ -464,6 +478,7 @@ impl ChartCard {
             bars,
             constructed: constructed.as_deref(),
             outputs: &outputs,
+            pending_panes: &pending_panes,
             indicators,
         };
         let layout = self.frame_layout(

@@ -46,7 +46,7 @@ fn frame<'a>(bars: &'a [Kline], symbol: &'a SymbolInfo) -> ChartFrame<'a> {
         bars,
         symbol,
         bar_seconds: None,
-        timeframe_seconds: None,
+        timeframe: None,
         theme: ChartTheme::DARK,
         visible_range: None,
     }
@@ -180,4 +180,65 @@ fn a_restart_is_a_new_epoch_and_keeps_the_last_valid_output_up() {
         "the old output stays while the new run goes"
     );
     assert!(runs.logs(1).unwrap().epoch > epoch);
+}
+
+#[test]
+fn a_timeframe_switch_hides_the_old_values_and_keeps_the_pane_pending() {
+    let ctx = egui::Context::default();
+    let symbol = symbol();
+    let bars = hourly(12);
+    let mut chart = frame(&bars, &symbol);
+    chart.timeframe = Some(Timeframe::parse("5m").unwrap());
+    let mut runs = ChartRuns::default();
+    let instances = [PineInstance::new(
+        1,
+        None,
+        "Pane",
+        "//@version=6\nindicator(\"Pane\")\nplot(close)",
+    )];
+    wait(&mut runs, &chart, &instances, 1);
+
+    chart.timeframe = Some(Timeframe::parse("15m").unwrap());
+    assert!(runs.update(&ctx, &chart, &instances).is_empty());
+    assert!(runs.last_outputs(&instances).is_empty());
+    assert!(runs.pane_pending(1));
+    assert!(runs.status(1).is_none());
+    wait(&mut runs, &chart, &instances, 1);
+    assert!(!runs.pane_pending(1));
+}
+
+#[test]
+fn switching_back_reuses_a_matching_result_and_recomputes_changed_candles() {
+    let ctx = egui::Context::default();
+    let symbol = symbol();
+    let mut bars = hourly(12);
+    let mut chart = frame(&bars, &symbol);
+    let five = Some(Timeframe::parse("5m").unwrap());
+    let fifteen = Some(Timeframe::parse("15m").unwrap());
+    let instances = [PineInstance::new(1, None, "Plain", PLAIN)];
+    let mut runs = ChartRuns::default();
+    chart.timeframe = five;
+    wait(&mut runs, &chart, &instances, 1);
+    let original = runs.last_outputs(&instances).pop().unwrap().0;
+    let generation = runs.generation_for_tests(1);
+    let epoch = runs.logs(1).unwrap().epoch;
+
+    chart.timeframe = fifteen;
+    wait(&mut runs, &chart, &instances, 1);
+    chart.timeframe = five;
+    let cached = runs.update(&ctx, &chart, &instances).pop().unwrap().0;
+    assert!(Arc::ptr_eq(&original, &cached));
+    assert_eq!(runs.generation_for_tests(1), generation);
+    assert_eq!(runs.logs(1).unwrap().epoch, epoch);
+
+    chart.timeframe = fifteen;
+    runs.update(&ctx, &chart, &instances);
+    bars[3].close += 0.5;
+    let mut changed = frame(&bars, &symbol);
+    changed.timeframe = five;
+    assert!(runs.update(&ctx, &changed, &instances).is_empty());
+    assert!(runs.last_outputs(&instances).is_empty());
+    wait(&mut runs, &changed, &instances, 1);
+    assert_eq!(runs.logs(1).unwrap().epoch, epoch, "the worker was reused");
+    assert!(!Arc::ptr_eq(&original, &runs.last_outputs(&instances)[0].0));
 }
