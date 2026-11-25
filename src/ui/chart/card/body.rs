@@ -99,18 +99,6 @@ impl ChartCard {
             return true;
         }
         if args.candles.is_empty() {
-            if self
-                .timeframe
-                .is_some_and(|timeframe| args.source.streams_trades_for(timeframe))
-            {
-                painter.text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    tr!("Waiting for a full candle from live trades…"),
-                    FontId::proportional(13.0),
-                    theme::text_secondary(),
-                );
-            }
             return true;
         }
         if args.source == DataSource::CoinMarketCap

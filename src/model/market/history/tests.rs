@@ -206,21 +206,3 @@ fn a_chart_with_a_script_pages_back_until_it_holds_what_scripts_run_over() {
     paging.arrived(0);
     assert!(!paging.should_request(true, true, 500, now));
 }
-
-#[test]
-fn completed_seconds_history_repairs_overlap_and_preserves_the_live_tail() {
-    let mut held = [1000, 3000, 5000, 8000]
-        .into_iter()
-        .map(|ms| bars(ms..ms + 1).remove(0))
-        .collect::<Vec<_>>();
-    let mut corrected = held[1].clone();
-    corrected.close = 42.;
-    let filled = bars(4_000..4_001).remove(0);
-    merge_completed(&mut held, vec![corrected, filled]);
-    let times = times(&held);
-    assert_eq!(times, [1000, 3000, 4000, 5000, 8000]);
-    assert_eq!(held[1].close, 42.);
-    let expected = held.clone();
-    merge_completed(&mut held, Vec::new());
-    assert_eq!(held, expected);
-}

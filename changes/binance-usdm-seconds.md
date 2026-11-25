@@ -1,1 +1,1 @@
-new: Chart the Binance USD-M ETHUSDT perpetual (ETHUSDT.P) and use live custom seconds candles on both BTCUSDT.P and ETHUSDT.P.
+new: Chart ETHUSDT.P on Binance USD-M and use historical and live custom seconds candles on both BTCUSDT.P and ETHUSDT.P.

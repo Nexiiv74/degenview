@@ -57,25 +57,20 @@ pub fn chart(
     }
 
     let ctx = ui.ctx().clone();
-    if preview.market.source.streams_trades_for(preview.timeframe) {
-        preview.stream_trades(&ctx);
-    }
-    let refresh = if preview.market.source.streams_trades_for(preview.timeframe) {
-        std::time::Duration::from_secs(45)
-    } else {
-        REFRESH_INTERVAL
-    };
+    preview.stream_seconds(&ctx);
     if preview.want_fetch() {
         preview.fetch(&ctx);
     } else if preview.inbox.is_none()
-        && preview.last_fetch.is_some_and(|at| at.elapsed() >= refresh)
+        && preview
+            .last_fetch
+            .is_some_and(|at| at.elapsed() >= REFRESH_INTERVAL)
     {
         // Quiet refresh: the candles stay up while the new ones load.
         preview.fetched_for = None;
         preview.fetch(&ctx);
         preview.loading = false;
     }
-    ctx.request_repaint_after(refresh);
+    ctx.request_repaint_after(REFRESH_INTERVAL);
 
     let inner = area.shrink(6.0);
     let mut chart_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner));

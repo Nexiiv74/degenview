@@ -30,7 +30,7 @@ const fn native(count: u16, unit: TimeUnit) -> Timeframe {
     }
 }
 
-/// Binance's spot kline intervals. USD-M uses the same list starting at `1m`. Its
+/// Binance kline intervals. USD-M serves `1s` through continuous perpetual klines. Its
 /// `3d` is left out: Binance counts those from a day of its own
 /// (not a multiple of three since 1970-01-01), so they would not match every other source's.
 /// Weeks start on Monday, as here.
@@ -192,8 +192,7 @@ impl DataSource {
     /// candles to ask for (CoinGecko builds them from prices, the line charts are not candles).
     pub fn natives(self) -> &'static [Timeframe] {
         match self {
-            Self::Binance => &BINANCE,
-            Self::BinanceUsdM => &BINANCE[1..],
+            Self::Binance | Self::BinanceUsdM => &BINANCE,
             Self::Coinbase => &COINBASE,
             Self::Okx => &OKX,
             Self::Kraken => &KRAKEN,
@@ -212,17 +211,9 @@ impl DataSource {
         FoldPlan::new(timeframe, self.natives())
     }
 
-    /// Whether a chart builds these candles from live trades instead of requesting kline history.
-    pub(crate) fn streams_trades_for(self, timeframe: Timeframe) -> bool {
-        self == Self::BinanceUsdM && timeframe.is_subminute()
-    }
-
     /// Whether the source can chart `timeframe`: its candles fold to it, CoinGecko's price
     /// samples are fine enough, or the source draws a line that follows any timeframe.
     pub fn serves(self, timeframe: Timeframe) -> bool {
-        if self.streams_trades_for(timeframe) {
-            return true;
-        }
         match self {
             Self::Binance
             | Self::BinanceUsdM

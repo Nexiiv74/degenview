@@ -11,14 +11,6 @@ use std::time::{Duration, Instant};
 pub const PAGE: usize = 1_000;
 /// The most candles a chart keeps; paging stops there rather than growing without bound.
 pub const MAX_CANDLES: usize = 100_000;
-/// Live-only series have no periodic REST refresh to cap them. Make room in batches so a long
-/// running chart does not shift the entire series on every new candle.
-pub(crate) fn trim_live(candles: &mut Vec<Kline>) {
-    if candles.len() > MAX_CANDLES {
-        candles.drain(..PAGE);
-    }
-}
-
 /// How many candles a chart with a script on it pages back to by itself, without the user scrolling
 /// there: the 5,000 bars TradingView's Basic plan runs a script over (a Basic account's 5m chart
 /// of OKX BTC-USDC held 6,063, 21 days). A script keeps state across
@@ -129,34 +121,6 @@ pub fn prepend(held: &mut Vec<Kline>, mut page: Vec<Kline>) -> usize {
         *held = page;
     }
     added
-}
-
-/// Merge completed trade-derived candles without erasing the live tail or earlier archive pages.
-pub(crate) fn merge_completed(held: &mut Vec<Kline>, fresh: Vec<Kline>) {
-    let Some(first) = fresh.first() else { return };
-    let tail = held.partition_point(|bar| bar.open_time < first.open_time);
-    let mut held_tail = held
-        .drain(tail..)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .peekable();
-    for bar in fresh {
-        while held_tail
-            .peek()
-            .is_some_and(|old| old.open_time < bar.open_time)
-        {
-            held.push(held_tail.next().expect("peeked"));
-        }
-        if held_tail
-            .peek()
-            .is_some_and(|old| old.open_time == bar.open_time)
-        {
-            held_tail.next();
-        }
-        held.push(bar);
-    }
-    held.extend(held_tail);
-    trim_live(held);
 }
 
 /// What a refresh leaves on the chart: the candles it brought, with the older ones the chart

@@ -8,35 +8,6 @@ use crate::model::{Kline, Timeframe};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-mod trades;
-
-pub(crate) use trades::{AggregateTrade, TradeBars};
-
-/// A forming candle snapshot, or a candle whose trade coverage turned out to be incomplete.
-#[derive(Clone, Debug)]
-pub(crate) enum CandleUpdate {
-    Replace(Kline),
-    Remove(i64),
-}
-
-impl CandleUpdate {
-    pub fn open_time(&self) -> i64 {
-        match self {
-            Self::Replace(candle) => candle.open_time,
-            Self::Remove(open_time) => *open_time,
-        }
-    }
-}
-
-/// Removes an incomplete candle without disturbing other bars or the series order.
-pub(crate) fn remove_candle(candles: &mut Vec<Kline>, open_time: i64) -> bool {
-    let Ok(index) = candles.binary_search_by_key(&open_time, |bar| bar.open_time) else {
-        return false;
-    };
-    candles.remove(index);
-    true
-}
-
 /// Folds a live kline into `candles`: it replaces the newest candle of its open time or follows
 /// it. A kline older than the newest candle (a late final tick of the bar before one REST already
 /// brought) is ignored, so the series stays ascending. Returns whether the candles changed.

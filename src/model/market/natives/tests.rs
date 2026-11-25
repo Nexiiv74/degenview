@@ -11,8 +11,9 @@ const TABLE: [&str; 24] = [
     "3D", "5D", "1W", "2W", "1M", "2M", "3M", "6M", "1Y",
 ];
 
-const CANDLE_SOURCES: [DataSource; 9] = [
+const CANDLE_SOURCES: [DataSource; 10] = [
     DataSource::Binance,
+    DataSource::BinanceUsdM,
     DataSource::Coinbase,
     DataSource::Okx,
     DataSource::Kraken,
@@ -339,14 +340,23 @@ fn only_binance_okx_and_gate_serve_seconds_and_gate_only_those_of_ten() {
     for text in ["1s", "5s", "15s", "45s"] {
         assert_eq!(
             serving(text),
-            [DataSource::Binance, DataSource::Okx],
+            [
+                DataSource::Binance,
+                DataSource::BinanceUsdM,
+                DataSource::Okx
+            ],
             "{text}"
         );
     }
     for text in ["10s", "30s"] {
         assert_eq!(
             serving(text),
-            [DataSource::Binance, DataSource::Okx, DataSource::Gate],
+            [
+                DataSource::Binance,
+                DataSource::BinanceUsdM,
+                DataSource::Okx,
+                DataSource::Gate
+            ],
             "{text}"
         );
     }

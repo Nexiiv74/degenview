@@ -6,12 +6,13 @@
 //! the script for drawing, never the alert path.
 
 use super::inputs::{InputValues, InputsStore};
+use crate::model::market::live::{LiveFold, LiveMark};
 use crate::model::pine::script::ScriptType;
 use crate::model::{DataSource, Kline, Timeframe};
 use crate::pine::compiler::program::{InputSchema, InputValue};
-use crate::service::ProviderError;
 use crate::service::market::live::LiveFeed;
 use crate::service::work_queue::Pending;
+use crate::service::{LiveCandles, ProviderError};
 use crate::store::SharedStore;
 use crate::ui::ChartCard;
 use serde::{Deserialize, Serialize};
@@ -140,8 +141,10 @@ pub struct PreviewState {
     candles_fingerprint: u64,
     loading: bool,
     error: Option<ProviderError>,
-    inbox: Option<Pending<Result<Vec<Kline>, ProviderError>>>,
-    trade_feed: Option<LiveFeed>,
+    inbox: Option<Pending<Result<LiveCandles, ProviderError>>>,
+    live_feed: Option<LiveFeed>,
+    live_fold: LiveFold,
+    live_mark: Option<LiveMark>,
     last_fetch: Option<Instant>,
     /// What the candles on screen were fetched for.
     fetched_for: Option<(PreviewMarket, Timeframe)>,

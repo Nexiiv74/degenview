@@ -20633,7 +20633,3 @@ msgstr ""
 #: src/ui/chart/symbol_picker/search.rs
 msgid "Perpetual"
 msgstr ""
-
-#: src/ui/chart/card/body.rs
-msgid "Waiting for a full candle from live trades…"
-msgstr ""
