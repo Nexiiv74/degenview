@@ -66,6 +66,14 @@ fn stream_session(host: &str, path: &str, streams: impl Iterator<Item = String>)
 
 /// `{"stream":"btcusdt@kline_1h","data":{"k":{"t","o","h","l","c","v",…}}}`.
 pub(super) fn parse_kline(text: &str) -> Option<(String, Kline)> {
+    parse(text, |_, _, _| {})
+}
+
+pub(super) fn parse_usdm_kline(text: &str) -> Option<(String, Kline)> {
+    parse(text, crate::service::market::binance::record_usdm_second)
+}
+
+fn parse(text: &str, record_second: impl FnOnce(&str, &Kline, bool)) -> Option<(String, Kline)> {
     let value: Value = serde_json::from_str(text).ok()?;
     let stream = value.get("stream")?.as_str()?;
     let (symbol, topic) = stream.split_once('@')?;
@@ -85,18 +93,23 @@ pub(super) fn parse_kline(text: &str) -> Option<(String, Kline)> {
     let low = k.get("l").and_then(Value::as_str)?.parse().ok()?;
     let close = k.get("c").and_then(Value::as_str)?.parse().ok()?;
     let volume = k.get("v").and_then(Value::as_str)?.parse().ok()?;
-    Some((
-        symbol,
-        Kline {
-            open_time: t,
-            close_time,
-            open,
-            high,
-            low,
-            close,
-            volume,
-        },
-    ))
+    let candle = Kline {
+        open_time: t,
+        close_time,
+        open,
+        high,
+        low,
+        close,
+        volume,
+    };
+    if topic == "continuousKline_1s" {
+        record_second(
+            &symbol,
+            &candle,
+            k.get("x").and_then(Value::as_bool) == Some(true),
+        );
+    }
+    Some((symbol, candle))
 }
 
 #[cfg(test)]

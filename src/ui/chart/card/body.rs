@@ -93,7 +93,11 @@ impl ChartCard {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                error.to_string(),
+                if error.cooldown_remaining().is_some() {
+                    refresh_warning_text(error, args.source, true)
+                } else {
+                    error.to_string()
+                },
                 FontId::proportional(13.0),
                 theme::DOWN,
             );
@@ -351,6 +355,11 @@ impl ChartCard {
         replay: &mut ReplayChartFrame,
     ) -> ChartPointer {
         self.sync_baseline = None;
+        let cooldown = (source == DataSource::BinanceUsdM)
+            .then(crate::service::net::http::usd_m_cooldown)
+            .flatten()
+            .map(ProviderError::from);
+        let error = cooldown.as_ref().or(error);
         let args = BodyArgs {
             symbol,
             candles,

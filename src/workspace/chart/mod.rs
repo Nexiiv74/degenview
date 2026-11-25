@@ -413,6 +413,8 @@ impl Chart {
     pub(super) fn refresh_due(&self) -> bool {
         self.is_market()
             && self.inbox.is_none()
+            && (self.source != DataSource::BinanceUsdM
+                || crate::service::net::http::usd_m_cooldown().is_none())
             && self.last_fetch.elapsed() >= self.refresh_after()
             && !self
                 .error
@@ -444,14 +446,18 @@ impl Chart {
         };
         // Near the oldest candle, ahead of the user once, or while the scripts on the chart have
         // fewer candles than they are meant to run over.
-        let wanted = self.older.should_request(
-            self.source.supports_older_history(timeframe),
-            self.chart.near_oldest_bar()
-                || self.older.untouched()
+        // Page perpetual seconds history when the user approaches its left edge. An eager Pine
+        // warm-up on a 59s chart otherwise reads hundreds of thousands of one-second candles.
+        let near_oldest = self.chart.near_oldest_bar();
+        let eager = !(self.source == DataSource::BinanceUsdM && timeframe.is_subminute())
+            && (self.older.untouched()
                 || market::history::short_for_scripts(
                     self.chart.runs_scripts(),
                     self.candles.len(),
-                ),
+                ));
+        let wanted = self.older.should_request(
+            self.source.supports_older_history(timeframe),
+            near_oldest || eager,
             self.candles.len(),
             Instant::now(),
         );
@@ -529,6 +535,20 @@ impl Chart {
         match result {
             Ok(fetched) => {
                 let live = self.live.map(|mark| mark.for_refresh(self.last_fetch));
+                let now = crate::clock::now_ms();
+                // A seconds snapshot can be saved history, and a custom candle's close time can
+                // be later than the most recent one-second price it contains.
+                let data_at = if self.source == DataSource::BinanceUsdM && timeframe.is_subminute()
+                {
+                    let snapshot = fetched
+                        .bars
+                        .last()
+                        .or_else(|| fetched.candles.last())
+                        .map(|bar| bar.close_time.min(now));
+                    snapshot.max(self.live.and(self.last_data_ms))
+                } else {
+                    Some(now)
+                };
                 let fresh = self.live_fold.merge_fetched(
                     timeframe,
                     fetched.candles,
@@ -544,7 +564,7 @@ impl Chart {
                         .set_series(SeriesLine::build(&self.pm_series, fetched.series));
                 }
                 self.error = None;
-                self.last_data_ms = Some(crate::clock::now_ms());
+                self.last_data_ms = data_at;
             }
             Err(error) => self.error = Some(error),
         }

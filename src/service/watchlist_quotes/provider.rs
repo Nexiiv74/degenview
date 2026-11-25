@@ -129,6 +129,9 @@ fn get(source: DataSource, url: &str, headers: &[(&str, &str)]) -> Result<String
     match crate::service::net::http::get_text(url, headers, crate::service::net::http::Retry::Never)
     {
         Ok(body) => Ok(body),
+        Err(crate::service::net::http::Error::UsdMCooldown { .. }) => {
+            Err(QuoteFailure::RateLimited)
+        }
         Err(crate::service::net::http::Error::Status(code)) => Err(classify_status(source, code)),
         Err(error) => Err(QuoteFailure::Failed(tr!(
             "Network error: {error}",

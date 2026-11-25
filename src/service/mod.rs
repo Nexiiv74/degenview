@@ -250,6 +250,12 @@ pub fn fetch_klines_live(
     timeframe: Timeframe,
     limit: u32,
 ) -> Result<LiveCandles, ProviderError> {
+    if source == DataSource::BinanceUsdM && timeframe.is_subminute() {
+        let mut live = market::binance::fetch_usdm_seconds_live(symbol, timeframe, limit)?;
+        live.candles = normalize(live.candles);
+        live.bars = normalize(live.bars);
+        return Ok(live);
+    }
     let candles = fetch_klines(source, symbol, timeframe, limit)?;
     let bars = source
         .plan(timeframe)

@@ -81,7 +81,7 @@ impl LiveFeed {
             ),
             DataSource::BinanceUsdM => (
                 vec![binance::usdm_session(&symbols, base)?],
-                text_parser(binance::parse_kline),
+                text_parser(binance::parse_usdm_kline),
             ),
             DataSource::Okx => (
                 vec![okx::session(&symbols, base)?],
