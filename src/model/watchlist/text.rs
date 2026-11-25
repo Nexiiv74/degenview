@@ -256,9 +256,9 @@ fn instrument_from(token: &str) -> Result<WatchlistInstrument, String> {
 
     match source {
         DataSource::BinanceUsdM => {
-            if !crate::model::market::source::binance_usdm_btc(&rest) {
+            if crate::model::market::usdm_contract(&rest).is_none() {
                 return Err(crate::i18n::tr!(
-                    "Binance USD-M charts currently support BTCUSDT.P only."
+                    "Binance USD-M charts currently support BTCUSDT.P and ETHUSDT.P."
                 )
                 .to_owned());
             }
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn unsupported_rows_are_reported_with_their_line_and_never_block_good_ones() {
         let parsed = parse(
-            "BINANCE:BTCUSDT\nCME:ES1!\nBTC\nBINANCE:ETHUSDT.P\nCOINBASE:BTCUSD\nPOLYMARKET:9\n\
+            "BINANCE:BTCUSDT\nCME:ES1!\nBTC\nBINANCE:SOLUSDT.P\nCOINBASE:BTCUSD\nPOLYMARKET:9\n\
              CMC:fear\nNASDAQ:TOOLONGX\nBINANCE:\n\nBINANCE:ETHUSDT",
         );
         assert_eq!(parsed.rows.len(), 2);

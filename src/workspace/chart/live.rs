@@ -1,7 +1,9 @@
 //! The live candle feeds: one per streamed source on the workspace, folding its candles into the
 //! charts.
 
-use crate::model::market::live::LiveMark;
+use crate::model::market::USD_M_CONTRACTS;
+use crate::model::market::history::trim_live;
+use crate::model::market::live::{CandleUpdate, LiveMark, remove_candle};
 use crate::model::{DataSource, InstrumentId, Kline, Timeframe};
 use crate::service::market::live::LiveFeed;
 use crate::workspace::ChartWorkspace;
@@ -31,10 +33,18 @@ impl ChartWorkspace {
         // The stream is of the candle length the source serves the timeframe from (one-minute
         // klines for a 22-minute chart, monthly ones for a quarter); a timeframe it cannot reach
         // has none.
-        let base = source
-            .plan(self.timeframe)
-            .map(|plan| plan.base())
-            .filter(|_| !symbols.is_empty());
+        let base = if source.streams_trades_for(self.timeframe) {
+            // Both contracts ride one connection. Adding another chart cannot interrupt coverage
+            // of a candle already forming for the first one.
+            let needed = !symbols.is_empty();
+            symbols = USD_M_CONTRACTS.into_iter().map(str::to_owned).collect();
+            needed.then_some(self.timeframe)
+        } else {
+            source
+                .plan(self.timeframe)
+                .map(|plan| plan.base())
+                .filter(|_| !symbols.is_empty())
+        };
         let wanted = base.map(|base| (symbols, base));
         let changed = match (self.live_feeds.get(&source), &wanted) {
             (Some(feed), Some(wanted)) => feed.signature() != wanted,
@@ -57,16 +67,31 @@ impl ChartWorkspace {
         let updates = self
             .live_feeds
             .get(&source)
-            .map(|feed| feed.inbox.drain())
+            .map(|feed| feed.inbox.drain_updates())
             .unwrap_or_default();
         let Some(base) = base else {
             return;
         };
         let now = Instant::now();
-        for (symbol, kline) in updates {
-            self.overlay_hub
-                .apply_live(source, self.timeframe, base, &symbol, &kline, now);
-            self.apply_live_kline(source, base, &symbol, kline, now);
+        for (symbol, update) in updates {
+            match update {
+                CandleUpdate::Replace(kline) => {
+                    self.overlay_hub
+                        .apply_live(source, self.timeframe, base, &symbol, &kline, now);
+                    self.apply_live_kline(source, base, &symbol, kline, now);
+                }
+                CandleUpdate::Remove(open_time) => {
+                    let instrument = InstrumentId::new(source, symbol);
+                    self.overlay_hub.remove_live_candle(&instrument, open_time);
+                    for chart in &mut self.charts {
+                        if chart.source == source
+                            && InstrumentId::new(source, &chart.symbol).is_same_market(&instrument)
+                        {
+                            remove_candle(&mut chart.candles, open_time);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -93,6 +118,10 @@ impl ChartWorkspace {
                     .live_fold
                     .apply(timeframe, base, &mut chart.candles, kline.clone())
             {
+                if source.streams_trades_for(timeframe) {
+                    trim_live(&mut chart.candles);
+                    chart.loading = false;
+                }
                 chart.live = Some(LiveMark::new(open_time, now));
                 chart.last_data_ms = Some(crate::clock::now_ms());
             }

@@ -382,8 +382,15 @@ impl OverlayHub {
         let active = self.series.values().filter(|series| series.shown()).count();
         // First loads, then older pages, then refreshes; within each, the longest waiting first.
         let mut due: Vec<(u8, Option<Instant>, String)> = Vec::new();
-        for (key, series) in &self.series {
+        for (key, series) in &mut self.series {
             if !series.shown() || series.busy() || series.blocked() {
+                continue;
+            }
+            if series.instrument.source.streams_trades_for(timeframe) {
+                if series.status == OverlayStatus::Queued {
+                    series.status = OverlayStatus::Loading;
+                    self.version += 1;
+                }
                 continue;
             }
             if series.retry_at.is_some_and(|at| now < at) {
@@ -449,9 +456,29 @@ impl OverlayHub {
                 continue;
             };
             series.live = Some(LiveMark::new(open_time, now));
+            if source.streams_trades_for(timeframe) {
+                market::history::trim_live(&mut candles);
+                series.status = OverlayStatus::Ready;
+            }
             if series.set_candles(candles) {
                 self.version += 1;
             }
+        }
+    }
+
+    pub(super) fn remove_live_candle(&mut self, instrument: &InstrumentId, open_time: i64) {
+        let Some(series) = self.series.get_mut(&instrument.key()) else {
+            return;
+        };
+        let mut candles = (*series.candles).clone();
+        if market::live::remove_candle(&mut candles, open_time) {
+            series.status = if candles.is_empty() {
+                OverlayStatus::Loading
+            } else {
+                OverlayStatus::Ready
+            };
+            series.set_candles(candles);
+            self.version += 1;
         }
     }
 

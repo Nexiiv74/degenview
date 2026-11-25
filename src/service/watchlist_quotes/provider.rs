@@ -192,22 +192,26 @@ fn binance(requests: &[QuoteRequest]) -> Result<HashMap<String, SourceQuote>, Qu
 }
 
 fn binance_usdm(requests: &[QuoteRequest]) -> Result<HashMap<String, SourceQuote>, QuoteFailure> {
-    if !requests.iter().any(|request| request.symbol == "BTCUSDT") {
-        return Ok(HashMap::new());
-    }
     let base = crate::service::market::binance::USD_M_REST;
-    let body = get(
-        DataSource::BinanceUsdM,
-        &format!("{base}/ticker/24hr?symbol=BTCUSDT"),
-        &[],
-    )?;
-    let value = json(&body)?;
-    if !value.is_object() {
-        return Err(QuoteFailure::Failed(
-            tr!("Unexpected Binance response").to_owned(),
-        ));
+    let mut rows = Vec::new();
+    for symbol in crate::model::market::USD_M_CONTRACTS {
+        if !requests.iter().any(|request| request.symbol == symbol) {
+            continue;
+        }
+        let body = get(
+            DataSource::BinanceUsdM,
+            &format!("{base}/ticker/24hr?symbol={symbol}"),
+            &[],
+        )?;
+        let value = json(&body)?;
+        if !value.is_object() {
+            return Err(QuoteFailure::Failed(
+                tr!("Unexpected Binance response").to_owned(),
+            ));
+        }
+        rows.push(value);
     }
-    Ok(binance_quotes(std::slice::from_ref(&value), requests))
+    Ok(binance_quotes(&rows, requests))
 }
 
 /// How many answers in a row may fail before an adapter stops asking: the endpoint is

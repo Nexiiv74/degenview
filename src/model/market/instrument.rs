@@ -35,13 +35,8 @@ impl InstrumentId {
     /// USDT); Kraken's are `BASE/QUOTE` (USD) in the common tickers, never the legacy `XBT`.
     pub fn api_symbol(&self) -> String {
         match self.source {
-            DataSource::BinanceUsdM => {
-                if super::source::binance_usdm_btc(&self.symbol) {
-                    "BTCUSDT".to_owned()
-                } else {
-                    self.symbol.to_ascii_uppercase()
-                }
-            }
+            DataSource::BinanceUsdM => super::usdm_contract(&self.symbol)
+                .map_or_else(|| self.symbol.to_ascii_uppercase(), str::to_owned),
             DataSource::Mexc => {
                 let upper = self.symbol.to_uppercase().replace(['/', '-', '_', ' '], "");
                 // Its own quotes (`USD1`, `USDE`), and a one-letter base is a real asset (`S`).

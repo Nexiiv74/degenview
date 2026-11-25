@@ -57,7 +57,9 @@ pub fn chart(
     }
 
     let ctx = ui.ctx().clone();
-    if preview.want_fetch() {
+    if preview.market.source.streams_trades_for(preview.timeframe) {
+        preview.stream_trades(&ctx);
+    } else if preview.want_fetch() {
         preview.fetch(&ctx);
     } else if preview.inbox.is_none()
         && preview

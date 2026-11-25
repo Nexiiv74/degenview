@@ -413,3 +413,79 @@ fn bars_of_a_bucket_older_than_the_forming_one_are_ignored() {
     assert_eq!(merged[0], held_bucket());
     assert_eq!(merged[1], candles[0]);
 }
+
+fn trade(id: u64, time_ms: i64, price: f64, quantity: f64) -> AggregateTrade {
+    AggregateTrade {
+        id,
+        time_ms,
+        price,
+        quantity,
+    }
+}
+
+fn published(update: Option<CandleUpdate>) -> Kline {
+    let Some(CandleUpdate::Replace(bar)) = update else {
+        panic!("expected forming candle")
+    };
+    bar
+}
+
+#[test]
+fn usdm_seconds_start_on_a_covered_boundary_and_build_ordered_ohlcv() {
+    let timeframe = Timeframe::parse("7s").unwrap();
+    let mut stream = TradeBars::default();
+    assert!(stream.push(timeframe, trade(1, 1000, 9., 5.)).is_none());
+    assert!(stream.push(timeframe, trade(2, 6999, 8., 2.)).is_none());
+    let bar = published(stream.push(timeframe, trade(3, 7001, 10., 2.)));
+    assert_eq!((bar.open_time, bar.close_time), (7000, 13999));
+    assert_eq!((bar.open, bar.close, bar.volume), (10., 10., 2.));
+    assert!(stream.push(timeframe, trade(3, 7001, 10., 2.)).is_none());
+    published(stream.push(timeframe, trade(4, 7500, 13., 1.)));
+    let bar = published(stream.push(timeframe, trade(5, 7000, 8., 4.)));
+    assert_eq!(
+        (bar.open, bar.high, bar.low, bar.close, bar.volume),
+        (8., 13., 8., 13., 7.)
+    );
+    let next = published(stream.push(timeframe, trade(6, 14000, 11., 5.)));
+    assert_eq!((next.open_time, next.volume), (14000, 5.));
+    assert!(matches!(
+        stream.push(timeframe, trade(7, 13500, 10., 9.)),
+        Some(CandleUpdate::Remove(7000))
+    ));
+}
+
+#[test]
+fn usdm_seconds_retract_a_forming_candle_after_a_gap_or_disconnect() {
+    let timeframe = Timeframe::SECOND_1;
+    let mut stream = TradeBars::default();
+    assert!(stream.push(timeframe, trade(1, 1500, 10., 1.)).is_none());
+    published(stream.push(timeframe, trade(2, 2000, 11., 1.)));
+    assert!(matches!(
+        stream.push(timeframe, trade(4, 2200, 12., 1.)),
+        Some(CandleUpdate::Remove(2000))
+    ));
+    assert!(stream.push(timeframe, trade(5, 2400, 14., 1.)).is_none());
+    published(stream.push(timeframe, trade(6, 3000, 15., 1.)));
+    assert!(matches!(
+        stream.disconnect(),
+        Some(CandleUpdate::Remove(3000))
+    ));
+    assert!(stream.push(timeframe, trade(90, 5500, 20., 1.)).is_none());
+    let resumed = published(stream.push(timeframe, trade(91, 6000, 21., 3.)));
+    assert_eq!(
+        (resumed.open_time, resumed.open, resumed.volume),
+        (6000, 21., 3.)
+    );
+}
+
+#[test]
+fn usdm_custom_seconds_use_the_shared_midnight_boundary() {
+    let day = 86_400_000;
+    let timeframe = Timeframe::parse("7s").unwrap();
+    let mut stream = TradeBars::default();
+    stream.push(timeframe, trade(1, day - 10_000, 10., 1.));
+    let last = published(stream.push(timeframe, trade(2, day - 1, 11., 1.)));
+    assert_eq!((last.open_time, last.close_time), (day - 6000, day - 1));
+    let next = published(stream.push(timeframe, trade(3, day, 12., 1.)));
+    assert_eq!((next.open_time, next.close_time), (day, day + 6999));
+}
