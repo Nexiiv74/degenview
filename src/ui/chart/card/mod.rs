@@ -520,6 +520,10 @@ impl ChartCard {
     }
 
     pub fn set_timeframe(&mut self, timeframe: Timeframe) {
+        if self.timeframe != Some(timeframe) {
+            self.pine.suspend_series();
+            self.script_extent = Default::default();
+        }
         self.timeframe = Some(timeframe);
     }
 

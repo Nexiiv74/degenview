@@ -472,6 +472,7 @@ impl ChartWorkspace {
                                         }
                                         chart.chart.set_series_cutoff(replay_ms);
                                         chart.chart.set_timeframe(timeframe);
+                                        let loading_history = chart.loading_initial_history();
                                         let candles = displayed_candles(&chart.candles, replay_ms);
                                         if linked {
                                             chart.chart.follow_sync(
@@ -582,7 +583,7 @@ impl ChartWorkspace {
                                                 ui,
                                                 &chart.symbol,
                                                 candles,
-                                                chart.loading,
+                                                loading_history,
                                                 chart.error.as_ref(),
                                                 chart.scale_mode,
                                                 chart.source,

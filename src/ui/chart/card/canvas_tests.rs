@@ -1474,6 +1474,29 @@ fn an_own_pane_appears_only_after_the_script_confirms_it() {
 }
 
 #[test]
+fn switching_timeframes_draws_a_loading_pane_before_new_script_values() {
+    let mut harness = Harness::new(ChartCanvas::default());
+    let id = harness.card.add_pine_instance(None, "Pane", PANE_SCRIPT);
+    wait_for_run(&mut harness, id);
+    assert_eq!(harness.card.last_pine_outputs().len(), 1);
+
+    harness.card.set_timeframe(Timeframe::MINUTE_15);
+    assert!(harness.card.last_pine_outputs().is_empty());
+    let (shapes, _) = harness.frame();
+    assert_eq!(harness.card.pane_count(), 1);
+    assert!(harness.card.last_pine_outputs().is_empty());
+    assert!(
+        gather(&shapes)
+            .texts
+            .iter()
+            .any(|(_, text, _)| text == "Loading…")
+    );
+
+    wait_for_run(&mut harness, id);
+    assert_eq!(harness.card.last_pine_outputs().len(), 1);
+}
+
+#[test]
 fn a_script_that_cannot_compile_reports_the_error_without_claiming_a_pane() {
     let mut harness = Harness::new(ChartCanvas::default());
     let id = harness

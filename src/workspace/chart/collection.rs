@@ -355,6 +355,7 @@ impl ChartWorkspace {
         self.link_state.series_changed();
         for chart in &mut self.charts {
             chart.chart.reset_view();
+            chart.chart.set_timeframe(timeframe);
             chart.candles.clear();
             chart.reset_history();
             chart.forget_live();

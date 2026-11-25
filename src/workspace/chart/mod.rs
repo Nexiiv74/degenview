@@ -43,6 +43,8 @@ pub(super) struct Chart {
     pub(super) source: DataSource,
     pub(super) candles: Vec<Kline>,
     pub(super) loading: bool,
+    /// Whether the first history request finished for the current market and timeframe.
+    initial_fetch_done: bool,
     pub(super) error: Option<ProviderError>,
     pub(super) last_fetch: Instant,
     pub(super) inbox: Option<Receiver<Result<Fetched, ProviderError>>>,
@@ -138,6 +140,7 @@ impl Chart {
             source,
             candles: Vec::new(),
             loading: false,
+            initial_fetch_done: false,
             error: None,
             last_fetch: Instant::now(),
             inbox: None,
@@ -420,13 +423,20 @@ impl Chart {
     /// Forgets what was learnt of the history behind the candles: they are another market's or
     /// timeframe's now.
     pub(super) fn reset_history(&mut self) {
+        self.initial_fetch_done = false;
         self.older = OlderHistory::default();
         self.older_inbox = None;
     }
 
+    pub(super) fn loading_initial_history(&self) -> bool {
+        self.loading && !self.initial_fetch_done
+    }
+
     /// Asks the provider for the page before the oldest candle once the view has come near it.
     pub(super) fn request_older(&mut self, timeframe: Timeframe, ctx: &egui::Context) {
-        if !self.is_market() || !self.pm_series.is_empty() {
+        // A live tick can arrive before the first snapshot. Its open is not the history boundary
+        // from which paging should start.
+        if !self.is_market() || !self.pm_series.is_empty() || self.loading_initial_history() {
             return;
         }
         let Some(end) = market::history::page_end(&self.candles) else {
@@ -514,6 +524,7 @@ impl Chart {
         };
 
         self.loading = false;
+        self.initial_fetch_done = true;
         self.inbox = None;
         match result {
             Ok(fetched) => {

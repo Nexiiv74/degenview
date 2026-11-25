@@ -8,12 +8,13 @@
 mod tests;
 mod worker;
 
-use crate::model::Kline;
 use crate::model::pine::instance::{PineInstance, StoredInput, VisualOrder};
+use crate::model::{Kline, Timeframe};
 use crate::pine::compiler::program::{ChartTheme, SymbolInfo, VisualOutput};
 use crate::pine::logs::LogHistory;
 use crate::pine::outputs::style_overrides::{StyleOverrides, StyleRow, style_rows};
 use crate::pine::syntax::token::Diagnostic;
+use crate::pine::time::bucket::seconds_of;
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -100,10 +101,8 @@ pub struct ChartFrame<'a> {
     pub symbol: &'a SymbolInfo,
     /// The length of the chart's bars, when their times cannot say (price-based charts).
     pub bar_seconds: Option<f64>,
-    /// The length of the timeframe the chart is set to, in Pine's seconds (a month is 30 days):
-    /// what `timeframe.in_seconds()` reads, which the gap between two bars would misstate where a
-    /// bucket is cut short.
-    pub timeframe_seconds: Option<f64>,
+    /// The selected timeframe, even when its nominal length matches another timeframe's.
+    pub timeframe: Option<Timeframe>,
     /// The colours the chart is drawn on: what `chart.bg_color` and `chart.fg_color` read.
     pub theme: ChartTheme,
     /// The open times of the first and last bar on screen, for a script that reads them.
@@ -127,13 +126,13 @@ pub struct InstanceStatus<'a> {
 struct Run {
     source: String,
     inputs: HashMap<String, StoredInput>,
-    symbol: SymbolInfo,
-    bar_seconds: Option<u64>,
-    timeframe_seconds: Option<u64>,
     /// The chart colours the script ran against; a change of app theme runs it again.
     theme: ChartTheme,
     worker: PineWorker,
     requested: Option<RunRevision>,
+    shown_revision: Option<RunRevision>,
+    /// Returning to a series only shows cached output if it matches the bars now on the chart.
+    awaiting_series: bool,
     generation: u64,
     /// Which run of this chart this is; a restart (new source, inputs, symbol) is a new epoch.
     epoch: u64,
@@ -157,6 +156,31 @@ struct Run {
     busy_since: Option<Instant>,
 }
 
+impl Run {
+    fn is_drawable(&self) -> bool {
+        self.placement_known && !self.awaiting_series
+    }
+}
+
+#[derive(PartialEq)]
+struct ChartSeries {
+    symbol: SymbolInfo,
+    timeframe: Option<Timeframe>,
+    bar_seconds: Option<u64>,
+}
+
+/// The most recent other timeframe on this chart. A quick switch back can resume its worker
+/// through the same incremental update it would have used had the chart stayed there.
+struct ParkedSeries {
+    series: ChartSeries,
+    runs: HashMap<u64, Run>,
+    parked_at: Instant,
+}
+
+const PARKED_FOR: Duration = Duration::from_secs(30);
+const MAX_PARKED_BARS: usize =
+    crate::model::market::history::SCRIPT_DEPTH + crate::model::market::history::PAGE;
+
 /// The bars the runs were last handed, shared by every request made from them, with their
 /// fingerprint: worked out again only when the chart's bars differ from these.
 struct HandedBars {
@@ -168,6 +192,10 @@ struct HandedBars {
 #[derive(Default)]
 pub struct ChartRuns {
     runs: HashMap<u64, Run>,
+    series: Option<ChartSeries>,
+    parked: Option<ParkedSeries>,
+    /// A compiled non-overlay declaration can still reserve its pane while its data loads.
+    pane_ids: HashSet<u64>,
     /// Counts the runs this chart started, so each gets an epoch of its own: an instance id is
     /// reused once its script is removed, a run is never.
     epochs: u64,
@@ -181,19 +209,41 @@ impl ChartRuns {
     /// Stops every run; the next frame starts the visible instances afresh. Logging choices stay.
     pub fn stop_all(&mut self) {
         self.runs.clear();
+        self.parked = None;
+        self.pane_ids.clear();
+        self.handed = None;
     }
 
     /// Stops every run and forgets every instance's logging choice (the chart's scripts were
     /// replaced).
     pub fn reset(&mut self) {
-        self.runs.clear();
+        self.stop_all();
         self.logging_paused.clear();
     }
 
     /// Stops instance `id`'s run and forgets its logging choice (the script was removed).
     pub fn remove(&mut self, id: u64) {
         self.runs.remove(&id);
+        if let Some(parked) = &mut self.parked {
+            parked.runs.remove(&id);
+        }
+        self.pane_ids.remove(&id);
         self.logging_paused.remove(&id);
+    }
+
+    /// Hides data from the series being left immediately, including for read-only consumers
+    /// between the switch and the next chart frame.
+    pub fn suspend_series(&mut self) {
+        for run in self.runs.values_mut() {
+            run.awaiting_series = true;
+        }
+    }
+
+    pub fn pane_pending(&self, id: u64) -> bool {
+        self.pane_ids.contains(&id)
+            && self.runs.get(&id).is_none_or(|run| {
+                run.awaiting_series || !run.placement_known && run.error.is_none()
+            })
     }
 
     /// What the user can restyle in an instance's output, as the script itself draws it. Empty
@@ -201,17 +251,20 @@ impl ChartRuns {
     pub fn style_rows(&self, id: u64) -> Vec<StyleRow> {
         self.runs
             .get(&id)
-            .filter(|run| run.placement_known)
+            .filter(|run| run.is_drawable())
             .map(|run| style_rows(&run.output))
             .unwrap_or_default()
     }
 
     /// The messages an instance's script wrote with `log.*()` in its current run.
     pub fn logs(&self, id: u64) -> Option<PineLogs<'_>> {
-        self.runs.get(&id).map(|run| PineLogs {
-            epoch: run.epoch,
-            history: &run.logs,
-        })
+        self.runs
+            .get(&id)
+            .filter(|run| !run.awaiting_series)
+            .map(|run| PineLogs {
+                epoch: run.epoch,
+                history: &run.logs,
+            })
     }
 
     /// Forgets the messages kept for an instance's run. The run goes on and writes more.
@@ -239,7 +292,7 @@ impl ChartRuns {
     pub fn status(&self, id: u64) -> Option<InstanceStatus<'_>> {
         self.runs
             .get(&id)
-            .filter(|run| run.placement_known || run.error.is_some())
+            .filter(|run| !run.awaiting_series && (run.placement_known || run.error.is_some()))
             .map(|run| InstanceStatus {
                 output: &run.output,
                 error: run.error.as_ref(),
@@ -256,7 +309,11 @@ impl ChartRuns {
 
     /// The runtime failure that stopped the instance's run early.
     pub fn error(&self, id: u64) -> Option<&Diagnostic> {
-        self.runs.get(&id)?.error.as_ref()
+        self.runs
+            .get(&id)
+            .filter(|run| !run.awaiting_series)?
+            .error
+            .as_ref()
     }
 
     /// Whether a run of the instance has finished cleanly, so a later failure leaves real output
@@ -264,7 +321,7 @@ impl ChartRuns {
     pub fn has_valid_output(&self, id: u64) -> bool {
         self.runs
             .get(&id)
-            .is_some_and(|run| run.last_valid.is_some())
+            .is_some_and(|run| !run.awaiting_series && run.last_valid.is_some())
     }
 
     /// The instance's output as the script made it (strategy report, alerts), once its placement
@@ -272,7 +329,7 @@ impl ChartRuns {
     pub fn output(&self, id: u64) -> Option<&VisualOutput> {
         self.runs
             .get(&id)
-            .filter(|run| run.placement_known)
+            .filter(|run| run.is_drawable())
             .map(|run| &*run.output)
     }
 
@@ -289,7 +346,7 @@ impl ChartRuns {
                 let run = self
                     .runs
                     .get(&instance.id)
-                    .filter(|run| run.placement_known)?;
+                    .filter(|run| run.is_drawable())?;
                 Some((Arc::clone(&run.styled), instance.visual_order, instance.id))
             })
             .collect()
@@ -304,8 +361,11 @@ impl ChartRuns {
         instances: &[PineInstance],
     ) -> Vec<(Arc<VisualOutput>, VisualOrder, u64)> {
         if instances.iter().all(|instance| !instance.visible) {
-            self.runs.clear();
-            self.handed = None;
+            self.stop_all();
+            return Vec::new();
+        }
+        self.select_series(chart);
+        if chart.bars.is_empty() {
             return Vec::new();
         }
         let now_ms = crate::clock::now_ms();
@@ -316,22 +376,20 @@ impl ChartRuns {
             last_is_closed: last_candle_is_closed(chart.bars, now_ms),
         };
         let bars = Arc::clone(&bars.bars);
-        let bar_seconds = chart.bar_seconds.map(f64::to_bits);
-        let timeframe_seconds = chart.timeframe_seconds.map(f64::to_bits);
         let visible_ids: HashSet<u64> = instances
             .iter()
             .filter(|instance| instance.visible)
             .map(|instance| instance.id)
             .collect();
         self.runs.retain(|id, _| visible_ids.contains(id));
+        if let Some(parked) = &mut self.parked {
+            parked.runs.retain(|id, _| visible_ids.contains(id));
+        }
         let mut outputs = Vec::new();
         for instance in instances.iter().filter(|i| i.visible) {
             let configured = self.runs.get(&instance.id).is_some_and(|run| {
                 run.source == instance.source
                     && run.inputs == instance.inputs
-                    && run.symbol == *chart.symbol
-                    && run.bar_seconds == bar_seconds
-                    && run.timeframe_seconds == timeframe_seconds
                     && run.theme == chart.theme
             });
             if !configured {
@@ -340,16 +398,32 @@ impl ChartRuns {
             let Some(run) = self.runs.get_mut(&instance.id) else {
                 continue;
             };
+            // Only a script that reads the visible range depends on where the chart is scrolled.
+            let revision = if reads_visible_range(&instance.source) {
+                revision
+            } else {
+                RunRevision {
+                    visible_range: None,
+                    ..revision
+                }
+            };
             while let Ok(result) = run.worker.results.try_recv() {
                 let mut batch = result.logs;
                 if self.logging_paused.contains(&instance.id) {
                     batch.events.retain(|event| !event.realtime);
                 }
                 run.logs.apply(batch);
-                if result.generation != run.generation {
+                if result.generation != run.generation
+                    || run.awaiting_series && run.requested != Some(revision)
+                {
                     continue;
                 }
                 run.busy_since = None;
+                if run.awaiting_series {
+                    run.last_valid = None;
+                }
+                run.awaiting_series = false;
+                run.shown_revision = run.requested.filter(|_| result.error.is_none());
                 let output = Arc::new(result.output);
                 let shown = match (&result.error, run.last_valid.clone()) {
                     (None, _) => {
@@ -363,27 +437,22 @@ impl ChartRuns {
                 run.error = result.error;
                 run.placement_known = result.placement_known || run.last_valid.is_some();
                 run.styled_with = None;
+                if run.placement_known && !run.output.overlay {
+                    self.pane_ids.insert(instance.id);
+                } else {
+                    self.pane_ids.remove(&instance.id);
+                }
             }
-            // Only a script that reads the visible range depends on where the chart is scrolled:
-            // for every other one, panning is not a reason to run it again.
-            let (revision, visible_range) = if reads_visible_range(&instance.source) {
-                (revision, chart.visible_range)
-            } else {
-                (
-                    RunRevision {
-                        visible_range: None,
-                        ..revision
-                    },
-                    None,
-                )
-            };
+            if run.awaiting_series && run.shown_revision == Some(revision) {
+                run.awaiting_series = false;
+            }
             if run.requested != Some(revision) {
                 run.generation = run.generation.wrapping_add(1);
                 run.requested = Some(revision);
                 run.worker.request(WorkerRequest {
                     generation: run.generation,
                     bars: Arc::clone(&bars),
-                    visible_range,
+                    visible_range: revision.visible_range,
                     now_ms,
                 });
                 run.busy_since.get_or_insert_with(Instant::now);
@@ -394,17 +463,64 @@ impl ChartRuns {
                     repaint.request_repaint_after(left);
                 }
             }
+            if !run.is_drawable() {
+                continue;
+            }
             if run.styled_with.as_ref() != Some(&instance.style_overrides) {
                 run.styled = Arc::new(
                     StyleOverrides::new(instance.style_overrides.clone()).apply(&run.output),
                 );
                 run.styled_with = Some(instance.style_overrides.clone());
             }
-            if run.placement_known {
-                outputs.push((Arc::clone(&run.styled), instance.visual_order, instance.id));
-            }
+            outputs.push((Arc::clone(&run.styled), instance.visual_order, instance.id));
         }
         outputs
+    }
+
+    fn select_series(&mut self, chart: &ChartFrame<'_>) {
+        if self
+            .parked
+            .as_ref()
+            .is_some_and(|parked| parked.parked_at.elapsed() >= PARKED_FOR)
+        {
+            self.parked = None;
+        }
+        let bar_seconds = chart.bar_seconds.map(f64::to_bits);
+        if self.series.as_ref().is_some_and(|series| {
+            series.symbol == *chart.symbol
+                && series.timeframe == chart.timeframe
+                && series.bar_seconds == bar_seconds
+        }) {
+            return;
+        }
+        let next = ChartSeries {
+            symbol: chart.symbol.clone(),
+            timeframe: chart.timeframe,
+            bar_seconds,
+        };
+        self.suspend_series();
+        let previous = self.series.take();
+        let runs = std::mem::take(&mut self.runs);
+        if let Some(parked) = self.parked.take().filter(|parked| parked.series == next) {
+            self.runs = parked.runs;
+        }
+        if let Some(series) = previous
+            && series.symbol == next.symbol
+            && series.timeframe != next.timeframe
+            && self
+                .handed
+                .as_ref()
+                .is_some_and(|handed| handed.bars.len() <= MAX_PARKED_BARS)
+            && !runs.is_empty()
+        {
+            self.parked = Some(ParkedSeries {
+                series,
+                runs,
+                parked_at: Instant::now(),
+            });
+        }
+        self.handed = None;
+        self.series = Some(next);
     }
 
     /// Starts a new run of `instance`, in a new epoch, keeping the last valid output of the run it
@@ -414,7 +530,8 @@ impl ChartRuns {
         let previous_valid = self
             .runs
             .remove(&instance.id)
-            .and_then(|run| run.last_valid.clone());
+            .filter(|run| !run.awaiting_series)
+            .and_then(|run| run.last_valid);
         let placement_known = previous_valid.is_some();
         let shown = previous_valid
             .clone()
@@ -426,7 +543,7 @@ impl ChartRuns {
                 inputs: instance.input_values(),
                 symbol: chart.symbol.clone(),
                 bar_seconds: chart.bar_seconds,
-                timeframe_seconds: chart.timeframe_seconds,
+                timeframe_seconds: chart.timeframe.map(seconds_of),
             },
             repaint.clone(),
         );
@@ -435,12 +552,11 @@ impl ChartRuns {
             Run {
                 source: instance.source.clone(),
                 inputs: instance.inputs.clone(),
-                symbol: chart.symbol.clone(),
-                bar_seconds: chart.bar_seconds.map(f64::to_bits),
-                timeframe_seconds: chart.timeframe_seconds.map(f64::to_bits),
                 theme: chart.theme,
                 worker,
                 requested: None,
+                shown_revision: None,
+                awaiting_series: false,
                 generation: 0,
                 epoch: self.epochs,
                 logs: LogHistory::default(),
