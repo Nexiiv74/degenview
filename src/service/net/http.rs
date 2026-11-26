@@ -2,12 +2,44 @@
 //! remain at their call sites; this only bounds network work and classifies failures.
 
 use super::agent::FollowingAgent;
-use std::sync::LazyLock;
-use std::time::Duration;
+use crate::lock::lock;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use ureq::http::Response;
 
 const TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Default)]
+struct Cooldown(Mutex<Option<Instant>>);
+
+static USD_M_COOLDOWN: Cooldown = Cooldown(Mutex::new(None));
+
+impl Cooldown {
+    fn active(&self, now: Instant) -> Option<Error> {
+        lock(&self.0)
+            .filter(|resume_at| *resume_at > now)
+            .map(|resume_at| Error::UsdMCooldown { resume_at })
+    }
+
+    fn start(&self, status: u16, retry_after: Option<&str>, now: Instant) -> Error {
+        let fallback = Duration::from_secs(if status == 418 { 300 } else { 60 });
+        let delay = retry_after
+            .and_then(|header| header.trim().parse::<u64>().ok())
+            .map(|seconds| Duration::from_secs(seconds.max(1)))
+            .unwrap_or(fallback);
+        let mut until = lock(&self.0);
+        let resume_at = until
+            .unwrap_or(now)
+            .max(now.checked_add(delay).unwrap_or(now + fallback));
+        *until = Some(resume_at);
+        Error::UsdMCooldown { resume_at }
+    }
+}
+
+pub(crate) fn usd_m_cooldown() -> Option<Error> {
+    USD_M_COOLDOWN.active(Instant::now())
+}
 
 static AGENT: LazyLock<FollowingAgent> = LazyLock::new(|| {
     FollowingAgent::new(|config| {
@@ -63,6 +95,8 @@ pub enum Retry {
 pub enum Error {
     #[error("HTTP {0}")]
     Status(u16),
+    #[error("{}", crate::i18n::tr!("Binance USD-M requests paused after reaching the rate limit"))]
+    UsdMCooldown { resume_at: Instant },
     #[error("response exceeds {0} bytes")]
     BodyTooLarge(u64),
     #[error("{0}")]
@@ -132,7 +166,15 @@ fn get_with(
     max_body_bytes: u64,
     sleep: impl Fn(Duration),
 ) -> Result<String, Error> {
-    fetch(agent, url, headers, retry, sleep, |body| {
+    let cooldown = (super::proxy::host_of(url).as_deref() == Some("fapi.binance.com"))
+        .then_some(&USD_M_COOLDOWN);
+    if cooldown.is_some() {
+        if let Some(error) = usd_m_cooldown() {
+            return Err(error);
+        }
+        super::rate_limit::binance_usdm().wait_for_slot();
+    }
+    fetch(agent, url, headers, retry, sleep, cooldown, |body| {
         body.with_config().limit(max_body_bytes).read_to_string()
     })
 }
@@ -145,6 +187,7 @@ pub fn get_bytes(url: &str, max_body_bytes: u64) -> Result<Vec<u8>, Error> {
         &[],
         Retry::Transient,
         std::thread::sleep,
+        None,
         |body| body.with_config().limit(max_body_bytes).read_to_vec(),
     )
 }
@@ -157,10 +200,14 @@ fn fetch<T>(
     headers: &[(&str, &str)],
     retry: Retry,
     sleep: impl Fn(Duration),
+    cooldown: Option<&Cooldown>,
     read: impl Fn(&mut ureq::Body) -> Result<T, ureq::Error>,
 ) -> Result<T, Error> {
     let attempts = if retry == Retry::Transient { 2 } else { 1 };
     for attempt in 0..attempts {
+        if let Some(error) = cooldown.and_then(|guard| guard.active(Instant::now())) {
+            return Err(error);
+        }
         let (result, retry_after) = match agent.get_url(url, headers) {
             Ok(mut response) => {
                 let status = response.status().as_u16();
@@ -182,6 +229,11 @@ fn fetch<T>(
             Err(ureq::Error::StatusCode(code)) => (Err(Error::Status(code)), None),
             Err(error) => (Err(Error::Network(error.to_string())), None),
         };
+        if let Some(guard) = cooldown
+            && let Err(Error::Status(status @ (418 | 429))) = result
+        {
+            return Err(guard.start(status, retry_after.as_deref(), Instant::now()));
+        }
         let should_retry = result.as_ref().err().is_some_and(Error::is_transient);
         if attempt + 1 == attempts || !should_retry {
             return result;
@@ -271,6 +323,58 @@ mod tests {
     }
 
     #[test]
+    fn a_usdm_limit_pauses_other_requests_and_keeps_the_full_retry_after() {
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build(),
+        );
+        for status in [418, 429] {
+            let replies: &'static [(u16, &str)] = if status == 418 {
+                &[(418, "Retry-After: 90\r\n")]
+            } else {
+                &[(429, "Retry-After: 90\r\n")]
+            };
+            let (url, count, thread) = serve(replies);
+            let cooldown = Cooldown::default();
+            let before = Instant::now();
+            let ask = |path: &str| {
+                fetch(
+                    &agent,
+                    &format!("{url}/{path}"),
+                    &[],
+                    Retry::Transient,
+                    |_| panic!("a limited futures request must not immediately retry"),
+                    Some(&cooldown),
+                    |_| Ok(()),
+                )
+            };
+            let Err(Error::UsdMCooldown { resume_at }) = ask("btc") else {
+                panic!("expected a cooldown for {status}");
+            };
+            assert!(resume_at >= before + Duration::from_secs(90));
+            assert_eq!(ask("eth"), Err(Error::UsdMCooldown { resume_at }));
+            assert!(cooldown.active(resume_at).is_none());
+            thread.join().unwrap();
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn a_second_limit_cannot_shorten_an_existing_ban() {
+        let guard = Cooldown::default();
+        let now = Instant::now();
+        let blocked = guard.start(418, None, now);
+        assert_eq!(
+            blocked,
+            Error::UsdMCooldown {
+                resume_at: now + Duration::from_secs(300)
+            }
+        );
+        assert_eq!(guard.start(429, Some("5"), now), blocked);
+    }
+
+    #[test]
     fn response_body_limit_is_enforced() {
         let (url, _, thread) = serve(&[(200, "")]);
         let agent = ureq::Agent::new_with_defaults();
@@ -294,6 +398,7 @@ mod tests {
                 &[],
                 Retry::Never,
                 |_| {},
+                None,
                 read(MAX_BODY_BYTES)
             )
             .unwrap(),
@@ -302,7 +407,7 @@ mod tests {
         thread.join().unwrap();
         let (url, _, thread) = serve(&[(200, "")]);
         assert!(matches!(
-            fetch(&agent, &url, &[], Retry::Never, |_| {}, read(1)),
+            fetch(&agent, &url, &[], Retry::Never, |_| {}, None, read(1)),
             Err(Error::BodyTooLarge(1))
         ));
         thread.join().unwrap();

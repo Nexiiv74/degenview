@@ -45,6 +45,7 @@ pub(super) struct FrameData<'a> {
     pub bars: &'a [Kline],
     pub constructed: Option<&'a ConstructedSeries>,
     pub outputs: &'a [Placed],
+    pub pending_panes: &'a [u64],
     pub indicators: &'a IndicatorConfig,
 }
 
@@ -67,7 +68,7 @@ pub(super) struct FrameLayout<'a> {
     pub heights: PaneHeights,
     pub pane_specs: Vec<PaneSpec>,
     pub pane_rects: Vec<Rect>,
-    pub pane_outputs: Vec<(u64, &'a Arc<VisualOutput>)>,
+    pub pane_outputs: Vec<(u64, Option<&'a VisualOutput>)>,
     pub overlay_outputs: Vec<(&'a Arc<VisualOutput>, VisualOrder)>,
     pub bar_color_outputs: Vec<&'a Arc<VisualOutput>>,
     /// The pane that fills the chart, if it still exists.
@@ -93,6 +94,7 @@ pub(super) struct PaneSlot<'a> {
     pub rect: Rect,
     pub collapsed: bool,
     pub maximized: bool,
+    pub pending: bool,
     pub name: &'a str,
 }
 
@@ -181,12 +183,16 @@ impl ChartCard {
             data.chart_type,
         );
         let full_rect = rect;
-        let pane_outputs: Vec<(u64, &Arc<VisualOutput>)> = data
+        let mut pane_outputs: Vec<_> = data
             .outputs
             .iter()
             .filter(|(output, _, _)| !output.overlay && !line)
-            .map(|(output, _, id)| (*id, output))
+            .map(|(output, _, id)| (*id, Some(output.as_ref())))
             .collect();
+        if !line && !data.pending_panes.is_empty() {
+            pane_outputs.extend(data.pending_panes.iter().map(|&id| (id, None)));
+            pane_outputs.sort_by_key(|(id, _)| self.instances.iter().position(|i| i.id == *id));
+        }
         let overlay_outputs: Vec<(&Arc<VisualOutput>, VisualOrder)> = data
             .outputs
             .iter()
@@ -279,7 +285,8 @@ impl ChartCard {
                     widest = widest.max(measure(&text));
                 }
                 let shown = view.end - view.start;
-                for (pane_rect, (_, pine)) in pane_rects.iter().zip(&pane_outputs) {
+                for (pane_rect, (_, output)) in pane_rects.iter().zip(&pane_outputs) {
+                    let Some(pine) = output else { continue };
                     let height = (pane_rect.height() - 16.0).max(0.0);
                     for (_, label) in pane_labels(pine, shown, height, style) {
                         widest = widest.max(measure(&label));
@@ -551,7 +558,7 @@ impl ChartCard {
                     );
                 }
             }
-            if !collapsed {
+            if !collapsed && let Some(pine) = pine {
                 let pane_tooltip = draw_script_pane(
                     painter,
                     *pane_rect,
@@ -590,6 +597,7 @@ impl ChartCard {
                         rect: *pane_rect,
                         collapsed,
                         maximized,
+                        pending: pine.is_none(),
                         name,
                     },
                 );
@@ -669,7 +677,7 @@ impl ChartCard {
                     pane_pine: layout
                         .pane_outputs
                         .iter()
-                        .map(|(_, output)| &***output)
+                        .filter_map(|(_, output)| *output)
                         .collect(),
                 },
             );

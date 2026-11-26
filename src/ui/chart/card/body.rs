@@ -13,6 +13,7 @@ use crate::ui::paper::chart_trading::{MarkerMenu, PaperOverlayAction};
 pub(super) struct BodyArgs<'a> {
     pub symbol: &'a str,
     pub candles: &'a [Kline],
+    pub loading_history: bool,
     pub error: Option<&'a ProviderError>,
     pub scale_mode: PriceScaleMode,
     pub source: DataSource,
@@ -92,24 +93,19 @@ impl ChartCard {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                error.to_string(),
+                if error.cooldown_remaining().is_some() {
+                    refresh_warning_text(error, args.source, true)
+                } else {
+                    error.to_string()
+                },
                 FontId::proportional(13.0),
                 theme::DOWN,
             );
             return true;
         }
         if args.candles.is_empty() {
-            if self
-                .timeframe
-                .is_some_and(|timeframe| args.source.streams_trades_for(timeframe))
-            {
-                painter.text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    tr!("Waiting for a full candle from live trades…"),
-                    FontId::proportional(13.0),
-                    theme::text_secondary(),
-                );
+            if args.loading_history && self.runs_scripts() {
+                crate::ui::kit::loading::message(ui, rect, tr!("Loading…"));
             }
             return true;
         }
@@ -348,7 +344,7 @@ impl ChartCard {
         ui: &mut egui::Ui,
         symbol: &str,
         candles: &[Kline],
-        loading: bool,
+        loading_history: bool,
         error: Option<&ProviderError>,
         scale_mode: PriceScaleMode,
         source: DataSource,
@@ -359,9 +355,15 @@ impl ChartCard {
         replay: &mut ReplayChartFrame,
     ) -> ChartPointer {
         self.sync_baseline = None;
+        let cooldown = (source == DataSource::BinanceUsdM)
+            .then(crate::service::net::http::usd_m_cooldown)
+            .flatten()
+            .map(ProviderError::from);
+        let error = cooldown.as_ref().or(error);
         let args = BodyArgs {
             symbol,
             candles,
+            loading_history,
             error,
             scale_mode,
             source,
@@ -369,7 +371,6 @@ impl ChartCard {
             crosshair,
             chart_id,
         };
-        let _ = loading;
         let pointer = self.body_inner(ui, &args, drawing, replay);
         self.end_sync_frame(source, candles);
         if let (Some(error), false, Some(rect)) = (error, candles.is_empty(), pointer.rect) {
@@ -455,8 +456,18 @@ impl ChartCard {
         let symbol_info = body::symbol_info(symbol, source, chart_type);
         let source_bar_seconds =
             body::source_bar_seconds(candles, self.timeframe, constructed.is_some());
-        let placed = self.pine_outputs(ui.ctx(), &symbol_info, bars, source_bar_seconds);
+        let placed = if args.loading_history {
+            Vec::new()
+        } else {
+            self.pine_outputs(ui.ctx(), &symbol_info, bars, source_bar_seconds)
+        };
         let outputs = frame::split_forced_overlays(placed, line);
+        let pending_panes: Vec<_> = self
+            .instances
+            .iter()
+            .filter(|instance| instance.visible && self.pine.pane_pending(instance.id))
+            .map(|instance| instance.id)
+            .collect();
         self.feed_table(
             bars,
             chart_type,
@@ -476,6 +487,7 @@ impl ChartCard {
             bars,
             constructed: constructed.as_deref(),
             outputs: &outputs,
+            pending_panes: &pending_panes,
             indicators,
         };
         let layout = self.frame_layout(

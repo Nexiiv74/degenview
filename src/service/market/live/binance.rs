@@ -1,14 +1,9 @@
-//! Binance combined kline and USD-M aggregate-trade streams.
+//! Binance combined spot and USD-M kline streams.
 
-use crate::model::market::USD_M_CONTRACTS;
-use crate::model::market::live::{AggregateTrade, CandleUpdate, TradeBars};
+use crate::model::market::{USD_M_CONTRACTS, usdm_contract};
 use crate::model::{Kline, Timeframe};
-use crate::service::net::ws::{Frame, Keepalive, Session};
-use serde::Deserialize;
+use crate::service::net::ws::{Keepalive, Session};
 use serde_json::Value;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 const SPOT_HOST: &str = "stream.binance.com";
@@ -21,16 +16,23 @@ pub(super) fn session(symbols: &[String], base: Timeframe) -> Session {
 pub(super) fn usdm_session(symbols: &[String], base: Timeframe) -> Option<Session> {
     let supported: Vec<_> = USD_M_CONTRACTS
         .into_iter()
-        .filter(|id| symbols.iter().any(|symbol| symbol == id))
+        .filter(|&id| {
+            symbols
+                .iter()
+                .any(|symbol| usdm_contract(symbol) == Some(id))
+        })
         .map(str::to_owned)
         .collect();
     if supported.is_empty() {
         return None;
     }
-    if base.is_subminute() {
-        let streams = supported
-            .iter()
-            .map(|symbol| format!("{}@aggTrade", symbol.to_ascii_lowercase()));
+    if base == Timeframe::SECOND_1 {
+        let streams = supported.iter().map(|symbol| {
+            format!(
+                "{}_perpetual@continuousKline_1s",
+                symbol.to_ascii_lowercase()
+            )
+        });
         Some(stream_session(USD_M_HOST, "/market/stream", streams))
     } else {
         Some(combined_session(
@@ -62,88 +64,25 @@ fn stream_session(host: &str, path: &str, streams: impl Iterator<Item = String>)
     }
 }
 
-#[derive(Deserialize)]
-struct TradeMessage<'a> {
-    #[serde(borrow)]
-    data: TradePayload<'a>,
-}
-
-#[derive(Deserialize)]
-struct TradePayload<'a> {
-    #[serde(rename = "e")]
-    event: &'a str,
-    #[serde(rename = "s")]
-    symbol: &'a str,
-    #[serde(rename = "a")]
-    id: u64,
-    #[serde(rename = "T")]
-    time_ms: i64,
-    #[serde(rename = "p")]
-    price: &'a str,
-    #[serde(rename = "q")]
-    quantity: &'a str,
-}
-
-fn parse_trade(text: &str) -> Option<(&str, AggregateTrade)> {
-    let data = serde_json::from_str::<TradeMessage<'_>>(text).ok()?.data;
-    if data.event != "aggTrade" || data.time_ms <= 0 {
-        return None;
-    }
-    let price = data.price.parse::<f64>().ok()?;
-    let quantity = data.quantity.parse::<f64>().ok()?;
-    (price.is_finite() && price > 0.0 && quantity.is_finite() && quantity > 0.0).then_some((
-        data.symbol,
-        AggregateTrade {
-            id: data.id,
-            time_ms: data.time_ms,
-            price,
-            quantity,
-        },
-    ))
-}
-
-/// The linked session calls both callbacks serially on its own worker thread.
-pub(super) fn run_trades(
-    session: &Session,
-    shutdown: &AtomicBool,
-    timeframe: Timeframe,
-    publish: impl Fn(&str, CandleUpdate),
-) {
-    let markets = RefCell::new(
-        USD_M_CONTRACTS
-            .into_iter()
-            .map(|id| (id, TradeBars::default()))
-            .collect::<HashMap<_, _>>(),
-    );
-    session.run_linked(
-        shutdown,
-        |connected| {
-            if !connected {
-                for (symbol, bars) in markets.borrow_mut().iter_mut() {
-                    if let Some(update) = bars.disconnect() {
-                        publish(symbol, update);
-                    }
-                }
-            }
-        },
-        |frame| {
-            if let Frame::Text(text) = frame
-                && let Some((symbol, trade)) = parse_trade(text)
-                && let Some(bars) = markets.borrow_mut().get_mut(symbol)
-                && let Some(update) = bars.push(timeframe, trade)
-            {
-                publish(symbol, update);
-            }
-            true
-        },
-    );
-}
-
 /// `{"stream":"btcusdt@kline_1h","data":{"k":{"t","o","h","l","c","v",…}}}`.
 pub(super) fn parse_kline(text: &str) -> Option<(String, Kline)> {
+    parse(text, |_, _, _| {})
+}
+
+pub(super) fn parse_usdm_kline(text: &str) -> Option<(String, Kline)> {
+    parse(text, crate::service::market::binance::record_usdm_second)
+}
+
+fn parse(text: &str, record_second: impl FnOnce(&str, &Kline, bool)) -> Option<(String, Kline)> {
     let value: Value = serde_json::from_str(text).ok()?;
     let stream = value.get("stream")?.as_str()?;
-    let symbol = stream.split('@').next()?.to_uppercase();
+    let (symbol, topic) = stream.split_once('@')?;
+    let symbol = if topic.starts_with("continuousKline_") {
+        symbol.strip_suffix("_perpetual")?
+    } else {
+        symbol
+    }
+    .to_uppercase();
     let k = value.pointer("/data/k")?;
     let t = k.get("t").and_then(Value::as_i64)?;
     // `T` is the bar's last millisecond, as in the REST rows. Without it the forming bar would read
@@ -154,18 +93,23 @@ pub(super) fn parse_kline(text: &str) -> Option<(String, Kline)> {
     let low = k.get("l").and_then(Value::as_str)?.parse().ok()?;
     let close = k.get("c").and_then(Value::as_str)?.parse().ok()?;
     let volume = k.get("v").and_then(Value::as_str)?.parse().ok()?;
-    Some((
-        symbol,
-        Kline {
-            open_time: t,
-            close_time,
-            open,
-            high,
-            low,
-            close,
-            volume,
-        },
-    ))
+    let candle = Kline {
+        open_time: t,
+        close_time,
+        open,
+        high,
+        low,
+        close,
+        volume,
+    };
+    if topic == "continuousKline_1s" {
+        record_second(
+            &symbol,
+            &candle,
+            k.get("x").and_then(Value::as_bool) == Some(true),
+        );
+    }
+    Some((symbol, candle))
 }
 
 #[cfg(test)]
@@ -183,22 +127,11 @@ mod tests {
     }
 
     #[test]
-    fn usdm_trade_message_uses_trade_time_and_total_base_quantity() {
-        let json = r#"{"stream":"ethusdt@aggTrade","data":{"e":"aggTrade","s":"ETHUSDT","a":11,"E":9999,"T":1001,"p":"2900.50","q":"2.20","nq":"1.10"}}"#;
-        let (symbol, trade) = parse_trade(json).unwrap();
-        assert_eq!(symbol, "ETHUSDT");
-        assert_eq!((trade.id, trade.time_ms), (11, 1001));
-        assert_eq!((trade.price, trade.quantity), (2900.50, 2.20));
-        assert!(parse_trade(&json.replace("2900.50", "NaN")).is_none());
-        assert!(parse_trade(&json.replace("2.20", "-1")).is_none());
-    }
-
-    #[test]
     fn usdm_streams_use_the_futures_market_route_and_only_the_supported_contract() {
         let symbols = [
             "BTCUSDT".to_owned(),
-            "BTCUSDT".to_owned(),
-            "ETHUSDT".to_owned(),
+            "btcusdt.p".to_owned(),
+            "ETHUSDT.P".to_owned(),
             "SOLUSDT".to_owned(),
         ];
         let session = usdm_session(&symbols, Timeframe::MINUTE_1).unwrap();
@@ -206,17 +139,21 @@ mod tests {
             session.url,
             "wss://fstream.binance.com/market/stream?streams=btcusdt@kline_1m/ethusdt@kline_1m"
         );
-        let trades = usdm_session(&symbols, Timeframe::parse("7s").unwrap()).unwrap();
+        let base = crate::model::DataSource::BinanceUsdM
+            .plan(Timeframe::parse("7s").unwrap())
+            .unwrap()
+            .base();
+        let seconds = usdm_session(&symbols, base).unwrap();
         assert_eq!(
-            trades.url,
-            "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade"
+            seconds.url,
+            "wss://fstream.binance.com/market/stream?streams=btcusdt_perpetual@continuousKline_1s/ethusdt_perpetual@continuousKline_1s"
         );
         assert!(usdm_session(&symbols[3..], Timeframe::MINUTE_1).is_none());
     }
 
     #[test]
     #[ignore = "needs the Binance USD-M public WebSocket"]
-    fn usdm_live_trade_stream_builds_second_candles_for_both_markets() {
+    fn usdm_continuous_stream_delivers_second_candles_for_both_markets() {
         use crate::model::DataSource;
         use crate::service::market::live::LiveFeed;
         use crate::service::net::proxy::{AppliedProxy, ProxyConfig};
@@ -230,16 +167,17 @@ mod tests {
             Timeframe::SECOND_1,
             eframe::egui::Context::default(),
         )
-        .expect("futures trades feed");
+        .expect("futures continuous kline feed");
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut seen = HashSet::new();
         while seen.len() < USD_M_CONTRACTS.len() {
             for (symbol, candle) in feed.inbox.drain() {
                 assert_eq!(candle.open_time % 1000, 0);
                 assert_eq!(candle.close_time - candle.open_time, 999);
-                assert!(candle.volume > 0.);
+                assert!(candle.volume >= 0.);
                 assert!(candle.high >= candle.open.max(candle.close));
                 assert!(candle.low <= candle.open.min(candle.close));
+                assert!(USD_M_CONTRACTS.contains(&symbol.as_str()));
                 seen.insert(symbol);
             }
             assert!(
@@ -300,6 +238,24 @@ mod tests {
         assert_eq!(
             session.url,
             "wss://stream.binance.com/stream?streams=btcusdt@kline_1s"
+        );
+    }
+
+    #[test]
+    fn parses_a_continuous_candle_under_the_futures_api_symbol() {
+        let text = r#"{"stream":"ethusdt_perpetual@continuousKline_1s","data":{"e":"continuous_kline","ps":"ETHUSDT","ct":"PERPETUAL","k":{"t":1700000000000,"T":1700000000999,"i":"1s","o":"10","h":"12","l":"9","c":"11","v":"42.5"}}}"#;
+        let (symbol, candle) = parse_kline(text).expect("continuous kline");
+        assert_eq!(symbol, "ETHUSDT");
+        assert_eq!(candle.close_time - candle.open_time, 999);
+        assert_eq!(
+            (
+                candle.open,
+                candle.high,
+                candle.low,
+                candle.close,
+                candle.volume
+            ),
+            (10.0, 12.0, 9.0, 11.0, 42.5)
         );
     }
 

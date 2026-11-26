@@ -1,5 +1,4 @@
 use crate::lock::lock;
-use crate::model::market::live::CandleUpdate;
 use crate::model::{DataSource, Kline, Timeframe};
 use crate::service::net::ws::{Frame, Session};
 use eframe::egui;
@@ -25,39 +24,24 @@ const INBOX_CAPACITY: usize = 4096;
 /// background kept every update for as long as the app ran.
 #[derive(Default)]
 pub struct LiveInbox {
-    latest: Mutex<BTreeMap<(i64, String), CandleUpdate>>,
+    latest: Mutex<BTreeMap<(i64, String), Kline>>,
 }
 
 impl LiveInbox {
     fn push(&self, symbol: String, kline: Kline) {
-        self.update(symbol, CandleUpdate::Replace(kline));
-    }
-
-    fn update(&self, symbol: String, update: CandleUpdate) {
         let mut latest = lock(&self.latest);
-        latest.insert((update.open_time(), symbol), update);
+        latest.insert((kline.open_time, symbol), kline);
         while latest.len() > INBOX_CAPACITY {
             latest.pop_first();
         }
     }
 
     /// Everything received since the last call, oldest bar first.
-    pub(crate) fn drain_updates(&self) -> Vec<(String, CandleUpdate)> {
+    pub fn drain(&self) -> Vec<(String, Kline)> {
         let mut latest = lock(&self.latest);
         std::mem::take(&mut *latest)
             .into_iter()
-            .map(|((_, symbol), update)| (symbol, update))
-            .collect()
-    }
-
-    #[cfg(test)]
-    fn drain(&self) -> Vec<(String, Kline)> {
-        self.drain_updates()
-            .into_iter()
-            .filter_map(|(symbol, update)| match update {
-                CandleUpdate::Replace(candle) => Some((symbol, candle)),
-                CandleUpdate::Remove(_) => None,
-            })
+            .map(|((_, symbol), kline)| (symbol, kline))
             .collect()
     }
 }
@@ -90,23 +74,6 @@ impl LiveFeed {
         base: Timeframe,
         ctx: egui::Context,
     ) -> Option<Self> {
-        if source.streams_trades_for(base) {
-            let session = binance::usdm_session(&symbols, base)?;
-            let inbox = Arc::new(LiveInbox::default());
-            let shutdown = Arc::new(AtomicBool::new(false));
-            let (thread_inbox, thread_shutdown) = (Arc::clone(&inbox), Arc::clone(&shutdown));
-            std::thread::spawn(move || {
-                binance::run_trades(&session, &thread_shutdown, base, |symbol, update| {
-                    thread_inbox.update(symbol.to_owned(), update);
-                    ctx.request_repaint();
-                });
-            });
-            return Some(Self {
-                inbox,
-                signature: (symbols, base),
-                shutdown,
-            });
-        }
         let (sessions, parse): (Vec<Session>, Parser) = match source {
             DataSource::Binance => (
                 vec![binance::session(&symbols, base)],
@@ -114,7 +81,7 @@ impl LiveFeed {
             ),
             DataSource::BinanceUsdM => (
                 vec![binance::usdm_session(&symbols, base)?],
-                text_parser(binance::parse_kline),
+                text_parser(binance::parse_usdm_kline),
             ),
             DataSource::Okx => (
                 vec![okx::session(&symbols, base)?],
@@ -189,19 +156,6 @@ mod tests {
             close,
             volume: 1.0,
         }
-    }
-
-    #[test]
-    fn a_removed_candle_displaces_a_queued_partial_snapshot() {
-        let inbox = LiveInbox::default();
-        inbox.push("BTCUSDT".into(), kline(1000, 10.));
-        inbox.push("ETHUSDT".into(), kline(1000, 20.));
-        inbox.update("BTCUSDT".into(), CandleUpdate::Remove(1000));
-        let updates = inbox.drain_updates();
-        assert!(
-            matches!(&updates[..], [(btc, CandleUpdate::Remove(1000)), (eth, CandleUpdate::Replace(_))]
-            if btc == "BTCUSDT" && eth == "ETHUSDT")
-        );
     }
 
     #[test]

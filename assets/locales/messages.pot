@@ -1937,6 +1937,23 @@ msgstr ""
 msgid "Bid {size} ({worth})"
 msgstr ""
 
+#: src/model/watchlist/text.rs
+#: src/service/market/binance/mod.rs
+msgid "Binance USD-M charts currently support BTCUSDT.P and ETHUSDT.P."
+msgstr ""
+
+#: src/ui/chart/card/mod.rs
+msgid "Binance USD-M history paused"
+msgstr ""
+
+#: src/ui/chart/card/mod.rs
+msgid "Binance USD-M history paused · retries in {seconds}s"
+msgstr ""
+
+#: src/service/net/http.rs
+msgid "Binance USD-M requests paused after reaching the rate limit"
+msgstr ""
+
 #: src/ui/market_flow/mod.rs
 msgid "Binance and Bybit announce them as they happen."
 msgstr ""
@@ -8294,6 +8311,8 @@ msgstr ""
 
 #: src/pine_studio/debug/panel/tree.rs
 #: src/ui/alert/pine_editor.rs
+#: src/ui/chart/card/body.rs
+#: src/ui/chart/card/live_overlays.rs
 #: src/ui/chart/settings/compare.rs
 msgid "Loading…"
 msgstr ""
@@ -10852,6 +10871,10 @@ msgstr ""
 
 #: src/ui/drawing/properties/fib_pages.rs
 msgid "Percents"
+msgstr ""
+
+#: src/ui/chart/symbol_picker/search.rs
+msgid "Perpetual"
 msgstr ""
 
 #: src/ui/replay/bar.rs
@@ -20624,16 +20647,4 @@ msgstr ""
 #: src/ui/window/tab_link_menu/mod.rs
 msgctxt "what a link syncs, in a list"
 msgid "time"
-msgstr ""
-
-#: src/model/watchlist/text.rs src/service/market/binance.rs
-msgid "Binance USD-M charts currently support BTCUSDT.P and ETHUSDT.P."
-msgstr ""
-
-#: src/ui/chart/symbol_picker/search.rs
-msgid "Perpetual"
-msgstr ""
-
-#: src/ui/chart/card/body.rs
-msgid "Waiting for a full candle from live trades…"
 msgstr ""

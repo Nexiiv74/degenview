@@ -8,35 +8,6 @@ use crate::model::{Kline, Timeframe};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-mod trades;
-
-pub(crate) use trades::{AggregateTrade, TradeBars};
-
-/// A forming candle snapshot, or a candle whose trade coverage turned out to be incomplete.
-#[derive(Clone, Debug)]
-pub(crate) enum CandleUpdate {
-    Replace(Kline),
-    Remove(i64),
-}
-
-impl CandleUpdate {
-    pub fn open_time(&self) -> i64 {
-        match self {
-            Self::Replace(candle) => candle.open_time,
-            Self::Remove(open_time) => *open_time,
-        }
-    }
-}
-
-/// Removes an incomplete candle without disturbing other bars or the series order.
-pub(crate) fn remove_candle(candles: &mut Vec<Kline>, open_time: i64) -> bool {
-    let Ok(index) = candles.binary_search_by_key(&open_time, |bar| bar.open_time) else {
-        return false;
-    };
-    candles.remove(index);
-    true
-}
-
 /// Folds a live kline into `candles`: it replaces the newest candle of its open time or follows
 /// it. A kline older than the newest candle (a late final tick of the bar before one REST already
 /// brought) is ignored, so the series stays ascending. Returns whether the candles changed.
@@ -160,8 +131,8 @@ impl LiveFold {
     /// bucket of `target`, fetched on their own (empty when the source has the target itself or
     /// the request failed).
     ///
-    /// An answer no socket bar is newer than (`live_open` is `None`) replaces the forming bucket,
-    /// so the fold starts it again. With `bars`, the forming bucket is those bars merged with the
+    /// A snapshot that reaches the forming bucket can replace it when the socket was quiet during
+    /// the request. With `bars`, the forming bucket is those bars merged with the
     /// socket's, bar by bar (the state with more volume wins), so what the socket missed before
     /// it connected, or while it was quiet, is not lost and nothing is counted twice; a bucket
     /// the socket has not reached yet starts from them, and one newer than them is left alone.
@@ -174,15 +145,21 @@ impl LiveFold {
         fetched: Vec<Kline>,
         bars: Vec<Kline>,
         current: &[Kline],
-        live_open: Option<i64>,
+        live: LiveRefresh,
         limit: usize,
     ) -> Vec<Kline> {
-        if live_open.is_none() {
-            self.reset();
-        }
         let bucket = bars
             .last()
             .map(|bar| bucket_start_ms(target, bar.open_time));
+        let snapshot_end = bucket.max(fetched.last().map(|candle| candle.open_time));
+        if !matches!(live, LiveRefresh::Updated(_))
+            && self
+                .forming
+                .as_ref()
+                .is_some_and(|forming| snapshot_end >= Some(forming.open_time))
+        {
+            self.reset();
+        }
         if let Some(bucket) = bucket {
             match &mut self.forming {
                 Some(forming) if forming.is_of(target, bucket) => {
@@ -195,7 +172,7 @@ impl LiveFold {
                 _ => self.forming = Some(Forming::from_bars(target, bucket, bars)),
             }
         }
-        let mut merged = merge_fetched(fetched, current, live_open, limit);
+        let mut merged = merge_fetched(fetched, current, live, limit);
         if let Some(bucket) = bucket
             && let Some(forming) = self.forming.as_ref().filter(|f| f.is_of(target, bucket))
             && merged.last().is_none_or(|last| last.open_time <= bucket)
@@ -254,33 +231,62 @@ impl LiveMark {
         Self { open_time, arrived }
     }
 
-    /// The open time a refresh must keep held bars from, for a request begun at
-    /// `request_started`. A socket that went quiet before the request began is not fresher than
-    /// the answer, so the snapshot may update the forming bar again.
-    pub fn guard_for(&self, request_started: Instant) -> Option<i64> {
-        (self.arrived >= request_started).then_some(self.open_time)
+    pub fn for_refresh(&self, request_started: Instant) -> LiveRefresh {
+        if self.arrived >= request_started {
+            LiveRefresh::Updated(self.open_time)
+        } else {
+            LiveRefresh::Quiet
+        }
     }
 }
 
-/// A REST snapshot merged over the candles held: bars the socket delivered at or after
-/// `live_open_time` (from [`LiveMark::guard_for`]) win over the snapshot's copy of them. Keeps the
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LiveRefresh {
+    /// The chart has received no live candles for this market and timeframe.
+    #[default]
+    Unseen,
+    /// The feed last updated before the request, so the snapshot can refresh any candle it covers.
+    Quiet,
+    /// The feed updated during the request, with this as its newest candle's open time.
+    Updated(i64),
+}
+
+/// After the first live update, merge by open time from the start of the snapshot. Keep held
+/// candles the snapshot missed. When both hold a candle, use the snapshot's copy, except for a
+/// live candle updated during the request when the snapshot has not advanced past it. Keeps the
 /// newest `limit` candles.
-pub fn merge_fetched(
+fn merge_fetched(
     mut fetched: Vec<Kline>,
     current: &[Kline],
-    live_open_time: Option<i64>,
+    live: LiveRefresh,
     limit: usize,
 ) -> Vec<Kline> {
-    if let Some(live_open) = live_open_time
-        && let Some(last_fetched) = fetched.last()
-    {
-        let newer = current
-            .partition_point(|candle| candle.open_time < live_open.max(last_fetched.open_time));
-        if newer < current.len() {
-            let first_newer = current[newer].open_time;
-            fetched.retain(|candle| candle.open_time < first_newer);
-            fetched.extend_from_slice(&current[newer..]);
+    if live != LiveRefresh::Unseen {
+        let start = fetched.first().map_or(i64::MIN, |candle| candle.open_time);
+        let live_from = match live {
+            LiveRefresh::Updated(open) => Some(
+                fetched
+                    .last()
+                    .map_or(open, |candle| open.max(candle.open_time)),
+            ),
+            LiveRefresh::Quiet | LiveRefresh::Unseen => None,
+        };
+        let first_held = current.partition_point(|candle| candle.open_time < start);
+        let mut held = current[first_held..].iter().peekable();
+        let mut merged = Vec::with_capacity(fetched.len().max(held.len()));
+        for candle in fetched {
+            while let Some(earlier) = held.next_if(|bar| bar.open_time < candle.open_time) {
+                merged.push(earlier.clone());
+            }
+            let same = held.next_if(|bar| bar.open_time == candle.open_time);
+            if let Some(live) = same.filter(|bar| live_from == Some(bar.open_time)) {
+                merged.push(live.clone());
+            } else {
+                merged.push(candle);
+            }
         }
+        merged.extend(held.cloned());
+        fetched = merged;
     }
     if fetched.len() > limit {
         fetched.drain(..fetched.len() - limit);

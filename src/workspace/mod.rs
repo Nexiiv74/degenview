@@ -571,7 +571,7 @@ impl ChartWorkspace {
             chart.receive_fetch(timeframe);
             chart.receive_older(timeframe);
             chart.request_older(timeframe, &ctx);
-            if !chart.source.streams_trades_for(timeframe) && chart.refresh_due() {
+            if chart.refresh_due() {
                 chart.fetch(timeframe, &ctx);
             }
         }

@@ -170,7 +170,16 @@ fn truncated(label: &str, max: usize) -> String {
 
 /// What the warning pill says: rate limits get their own wording, `detailed` appends the error.
 fn refresh_warning_text(error: &ProviderError, source: DataSource, detailed: bool) -> String {
-    if error.is_rate_limited() {
+    if let Some(remaining) = error.cooldown_remaining() {
+        if detailed && !remaining.is_zero() {
+            let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0);
+            return tr!(
+                "Binance USD-M history paused · retries in {seconds}s",
+                seconds = seconds
+            );
+        }
+        tr!("Binance USD-M history paused").to_owned()
+    } else if error.is_rate_limited() {
         tr!(
             "{source} rate limit reached · showing the last result",
             source = source.display_name()
@@ -520,6 +529,10 @@ impl ChartCard {
     }
 
     pub fn set_timeframe(&mut self, timeframe: Timeframe) {
+        if self.timeframe != Some(timeframe) {
+            self.pine.suspend_series();
+            self.script_extent = Default::default();
+        }
         self.timeframe = Some(timeframe);
     }
 

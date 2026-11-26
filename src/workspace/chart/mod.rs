@@ -43,6 +43,8 @@ pub(super) struct Chart {
     pub(super) source: DataSource,
     pub(super) candles: Vec<Kline>,
     pub(super) loading: bool,
+    /// Whether the first history request finished for the current market and timeframe.
+    initial_fetch_done: bool,
     pub(super) error: Option<ProviderError>,
     pub(super) last_fetch: Instant,
     pub(super) inbox: Option<Receiver<Result<Fetched, ProviderError>>>,
@@ -138,6 +140,7 @@ impl Chart {
             source,
             candles: Vec::new(),
             loading: false,
+            initial_fetch_done: false,
             error: None,
             last_fetch: Instant::now(),
             inbox: None,
@@ -343,13 +346,6 @@ impl Chart {
         if !self.is_market() {
             return;
         }
-        if self.source.streams_trades_for(timeframe) {
-            self.fetch_generation.fetch_add(1, Ordering::AcqRel);
-            self.inbox = None;
-            self.error = None;
-            self.loading = self.candles.is_empty();
-            return;
-        }
         let (sender, receiver) = mpsc::channel();
         let symbol = self.symbol.clone();
         let source = self.source;
@@ -417,6 +413,8 @@ impl Chart {
     pub(super) fn refresh_due(&self) -> bool {
         self.is_market()
             && self.inbox.is_none()
+            && (self.source != DataSource::BinanceUsdM
+                || crate::service::net::http::usd_m_cooldown().is_none())
             && self.last_fetch.elapsed() >= self.refresh_after()
             && !self
                 .error
@@ -427,13 +425,20 @@ impl Chart {
     /// Forgets what was learnt of the history behind the candles: they are another market's or
     /// timeframe's now.
     pub(super) fn reset_history(&mut self) {
+        self.initial_fetch_done = false;
         self.older = OlderHistory::default();
         self.older_inbox = None;
     }
 
+    pub(super) fn loading_initial_history(&self) -> bool {
+        self.loading && !self.initial_fetch_done
+    }
+
     /// Asks the provider for the page before the oldest candle once the view has come near it.
     pub(super) fn request_older(&mut self, timeframe: Timeframe, ctx: &egui::Context) {
-        if !self.is_market() || !self.pm_series.is_empty() {
+        // A live tick can arrive before the first snapshot. Its open is not the history boundary
+        // from which paging should start.
+        if !self.is_market() || !self.pm_series.is_empty() || self.loading_initial_history() {
             return;
         }
         let Some(end) = market::history::page_end(&self.candles) else {
@@ -441,14 +446,18 @@ impl Chart {
         };
         // Near the oldest candle, ahead of the user once, or while the scripts on the chart have
         // fewer candles than they are meant to run over.
-        let wanted = self.older.should_request(
-            self.source.supports_older_history(timeframe),
-            self.chart.near_oldest_bar()
-                || self.older.untouched()
+        // Page perpetual seconds history when the user approaches its left edge. An eager Pine
+        // warm-up on a 59s chart otherwise reads hundreds of thousands of one-second candles.
+        let near_oldest = self.chart.near_oldest_bar();
+        let eager = !(self.source == DataSource::BinanceUsdM && timeframe.is_subminute())
+            && (self.older.untouched()
                 || market::history::short_for_scripts(
                     self.chart.runs_scripts(),
                     self.candles.len(),
-                ),
+                ));
+        let wanted = self.older.should_request(
+            self.source.supports_older_history(timeframe),
+            near_oldest || eager,
             self.candles.len(),
             Instant::now(),
         );
@@ -521,16 +530,31 @@ impl Chart {
         };
 
         self.loading = false;
+        self.initial_fetch_done = true;
         self.inbox = None;
         match result {
             Ok(fetched) => {
-                let live_open = self.live.and_then(|mark| mark.guard_for(self.last_fetch));
+                let live = self.live.map(|mark| mark.for_refresh(self.last_fetch));
+                let now = crate::clock::now_ms();
+                // A seconds snapshot can be saved history, and a custom candle's close time can
+                // be later than the most recent one-second price it contains.
+                let data_at = if self.source == DataSource::BinanceUsdM && timeframe.is_subminute()
+                {
+                    let snapshot = fetched
+                        .bars
+                        .last()
+                        .or_else(|| fetched.candles.last())
+                        .map(|bar| bar.close_time.min(now));
+                    snapshot.max(self.live.and(self.last_data_ms))
+                } else {
+                    Some(now)
+                };
                 let fresh = self.live_fold.merge_fetched(
                     timeframe,
                     fetched.candles,
                     fetched.bars,
                     &self.candles,
-                    live_open,
+                    live.unwrap_or_default(),
                     CANDLE_LIMIT as usize,
                 );
                 self.candles =
@@ -540,7 +564,7 @@ impl Chart {
                         .set_series(SeriesLine::build(&self.pm_series, fetched.series));
                 }
                 self.error = None;
-                self.last_data_ms = Some(crate::clock::now_ms());
+                self.last_data_ms = data_at;
             }
             Err(error) => self.error = Some(error),
         }

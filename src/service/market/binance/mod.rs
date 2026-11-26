@@ -7,6 +7,8 @@ use crate::service::{MarketSource, ProviderError, SearchResult, rank_results};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod seconds;
+
 pub(crate) const USD_M_REST: &str = "https://fapi.binance.com/fapi/v1";
 
 pub struct Binance {
@@ -25,33 +27,78 @@ pub const BINANCE_USDM: Binance = Binance {
 };
 
 impl Binance {
+    fn perpetual_pair(&self, symbol: &str) -> Result<&'static str, ProviderError> {
+        usdm_contract(symbol).ok_or_else(|| {
+            ProviderError::other(crate::i18n::tr!(
+                "Binance USD-M charts currently support BTCUSDT.P and ETHUSDT.P."
+            ))
+        })
+    }
+
     fn candle_url(
         &self,
         symbol: &str,
         base: Timeframe,
         limit: usize,
     ) -> Result<String, ProviderError> {
+        let interval = base.interval();
         let symbol = if self.source == DataSource::BinanceUsdM {
-            usdm_contract(symbol)
-                .ok_or_else(|| {
-                    ProviderError::other(crate::i18n::tr!(
-                        "Binance USD-M charts currently support BTCUSDT.P and ETHUSDT.P."
-                    ))
-                })?
-                .to_owned()
+            let pair = self.perpetual_pair(symbol)?;
+            if base == Timeframe::SECOND_1 {
+                return Ok(format!(
+                    "{USD_M_REST}/continuousKlines?pair={pair}&contractType=PERPETUAL&interval={interval}&limit={limit}"
+                ));
+            }
+            pair.to_owned()
         } else {
             symbol.to_uppercase()
         };
         Ok(format!(
-            "{}?symbol={symbol}&interval={}&limit={limit}",
+            "{}?symbol={symbol}&interval={interval}&limit={limit}",
             self.klines_url,
-            base.interval(),
         ))
+    }
+
+    fn page_size(&self, base: Timeframe) -> usize {
+        if self.source == DataSource::BinanceUsdM && base == Timeframe::SECOND_1 {
+            seconds::PAGE as usize
+        } else {
+            1_000
+        }
+    }
+
+    fn download(&self, url: &str) -> Result<Vec<Kline>, ProviderError> {
+        let body = crate::service::net::http::get_text(
+            url,
+            &[],
+            crate::service::net::http::Retry::Transient,
+        )?;
+        parse_klines(&body)
     }
 }
 
-/// The most klines one Binance request returns.
-const MAX_PER_REQUEST: usize = 1_000;
+pub(in crate::service) fn record_usdm_second(symbol: &str, bar: &Kline, closed: bool) {
+    seconds::record_live(symbol, bar, closed);
+}
+
+pub(in crate::service) fn clear_seconds_memory() {
+    seconds::clear();
+}
+
+pub(in crate::service) fn fetch_usdm_seconds_live(
+    symbol: &str,
+    timeframe: Timeframe,
+    limit: u32,
+) -> Result<crate::service::LiveCandles, ProviderError> {
+    let plan = plan(DataSource::BinanceUsdM, timeframe)?;
+    let (candles, bars) = seconds::latest(symbol, plan, limit as usize, true)?;
+    if candles.is_empty()
+        && let Some(error) = crate::service::net::http::usd_m_cooldown()
+    {
+        return Err(error.into());
+    }
+    Ok(crate::service::LiveCandles { candles, bars })
+}
 
 impl MarketSource for Binance {
     fn fetch_klines(
@@ -61,19 +108,18 @@ impl MarketSource for Binance {
         limit: u32,
     ) -> Result<Vec<Kline>, ProviderError> {
         let plan = plan(self.source, timeframe)?;
+        if self.source == DataSource::BinanceUsdM && timeframe.is_subminute() {
+            return seconds::latest(symbol, plan, limit as usize, false)
+                .map(|(candles, _)| candles);
+        }
         let requested = plan.base_count(limit as usize);
-        if requested > MAX_PER_REQUEST {
+        if requested > self.page_size(plan.base()) {
             // More finer candles than one request holds: page back from now.
             let end_ms = crate::clock::now_ms() + 1;
             return self.fetch_klines_range(symbol, timeframe, 0, end_ms, limit as usize);
         }
         let url = self.candle_url(symbol, plan.base(), requested)?;
-        let body = crate::service::net::http::get_text(
-            &url,
-            &[],
-            crate::service::net::http::Retry::Transient,
-        )?;
-        Ok(plan.shape(parse_klines(&body)?, requested, limit as usize))
+        Ok(plan.shape(self.download(&url)?, requested, limit as usize))
     }
 
     fn fetch_klines_range(
@@ -84,14 +130,17 @@ impl MarketSource for Binance {
         end_ms: i64,
         max: usize,
     ) -> Result<Vec<Kline>, ProviderError> {
-        const PAGE: usize = MAX_PER_REQUEST;
         // Pages are fetched side by side: their start times follow from the interval alone.
         const PARALLEL: usize = 8;
         let plan = plan(self.source, timeframe)?;
-        let url = self.candle_url(symbol, plan.base(), PAGE)?;
+        if self.source == DataSource::BinanceUsdM && timeframe.is_subminute() {
+            return seconds::range(symbol, plan, start_ms, end_ms, max);
+        }
+        let page_size = self.page_size(plan.base());
+        let url = self.candle_url(symbol, plan.base(), page_size)?;
         let requested = plan.base_count(max);
         let step = plan.base().nominal_ms();
-        let page_ms = step * PAGE as i64;
+        let page_ms = step * page_size as i64;
         let first = (end_ms - step * requested as i64).max(start_ms);
         let starts: Vec<i64> = (0..)
             .map(|index| first + index * page_ms)
@@ -107,12 +156,7 @@ impl MarketSource for Binance {
                         scope.spawn(move || {
                             let to = (from + page_ms).min(end_ms) - 1;
                             let url = format!("{url}&startTime={from}&endTime={to}");
-                            let body = crate::service::net::http::get_text(
-                                &url,
-                                &[],
-                                crate::service::net::http::Retry::Transient,
-                            )?;
-                            parse_klines(&body)
+                            self.download(&url)
                         })
                     })
                     .collect();
@@ -332,21 +376,34 @@ mod tests {
     }
 
     #[test]
-    fn usdm_folds_custom_minutes_and_provides_seconds_from_live_trades() {
+    fn usdm_seconds_use_the_continuous_endpoint_at_the_planned_base() {
         let source = DataSource::BinanceUsdM;
-        let custom = Timeframe::parse("7m").unwrap();
-        assert_eq!(source.plan(custom).unwrap().base(), Timeframe::MINUTE_1);
-        assert!(source.supports_older_history(custom));
-        let seconds = Timeframe::parse("7s").unwrap();
-        assert!(DataSource::Binance.serves(seconds));
-        assert!(source.serves(seconds));
-        assert!(source.streams_trades_for(seconds));
-        assert!(!source.supports_older_history(seconds));
-        assert!(
-            BINANCE_USDM
-                .fetch_klines("BTCUSDT.P", seconds, 4)
-                .unwrap_err()
-                .is_unsupported_interval()
+        let minutes = Timeframe::parse("7m").unwrap();
+        assert_eq!(source.plan(minutes).unwrap().base(), Timeframe::MINUTE_1);
+        assert_eq!(BINANCE_USDM.page_size(Timeframe::MINUTE_1), 1000);
+        assert!(source.supports_older_history(minutes));
+
+        for seconds in 1..60 {
+            let timeframe = Timeframe::parse(&format!("{seconds}s")).unwrap();
+            let base = source.plan(timeframe).unwrap().base();
+            assert_eq!(base, Timeframe::SECOND_1);
+            assert!(source.supports_older_history(timeframe));
+            let page = BINANCE_USDM.page_size(base);
+            assert_eq!(page, 999);
+            for (symbol, pair) in [("btcusdt.p", "BTCUSDT"), ("ETHUSDT.P", "ETHUSDT")] {
+                assert_eq!(
+                    BINANCE_USDM.candle_url(symbol, base, page).unwrap(),
+                    format!(
+                        "https://fapi.binance.com/fapi/v1/continuousKlines?pair={pair}&contractType=PERPETUAL&interval=1s&limit=999"
+                    )
+                );
+            }
+        }
+        assert_eq!(
+            BINANCE
+                .candle_url("btcusdt", Timeframe::SECOND_1, 1000)
+                .unwrap(),
+            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1s&limit=1000"
         );
     }
 
@@ -403,12 +460,14 @@ mod tests {
 
     #[test]
     fn a_series_of_more_than_one_requests_candles_is_paged_but_its_tail_is_not() {
-        assert!(base_of("5m").1 <= MAX_PER_REQUEST);
-        assert!(base_of("22m").1 > MAX_PER_REQUEST);
-        let tail = plan(DataSource::Binance, Timeframe::parse("22m").unwrap())
-            .unwrap()
-            .base_count(crate::service::cache::TAIL_LIMIT as usize);
-        assert!(tail <= MAX_PER_REQUEST);
+        for (provider, native, custom) in [(&BINANCE, "5m", "22m"), (&BINANCE_USDM, "1s", "7s")] {
+            let native = plan(provider.source, Timeframe::parse(native).unwrap()).unwrap();
+            let custom = plan(provider.source, Timeframe::parse(custom).unwrap()).unwrap();
+            assert!(native.base_count(500) <= provider.page_size(native.base()));
+            let page_size = provider.page_size(custom.base());
+            assert!(custom.base_count(500) > page_size);
+            assert!(custom.base_count(crate::service::cache::TAIL_LIMIT as usize) <= page_size);
+        }
     }
 
     #[test]

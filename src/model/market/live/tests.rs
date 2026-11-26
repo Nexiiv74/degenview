@@ -1,3 +1,4 @@
+use super::LiveRefresh::{Quiet, Unseen, Updated};
 use super::*;
 use crate::format::days_from_civil;
 use std::time::Duration;
@@ -48,35 +49,84 @@ fn an_identical_kline_changes_nothing() {
 fn live_bars_win_over_an_older_rest_snapshot() {
     let fetched = vec![candle(1, 10.0), candle(2, 20.0)];
     let live = vec![candle(1, 10.0), candle(2, 25.0), candle(3, 30.0)];
-    assert_eq!(merge_fetched(fetched.clone(), &live, Some(2), 500), live);
+    assert_eq!(merge_fetched(fetched.clone(), &live, Updated(2), 500), live);
+}
+
+#[test]
+fn a_refresh_keeps_live_seconds_candles_omitted_by_the_snapshot() {
+    let target = Timeframe::parse("3s").unwrap();
+    let second = |time, price| Kline {
+        close_time: time + 999,
+        ..candle(time, price)
+    };
+    let mut fold = LiveFold::default();
+    let mut current = Vec::new();
+    for time in [0, 3_000, 6_000, 9_000, 12_000] {
+        fold.apply(target, Timeframe::SECOND_1, &mut current, second(time, 1.0));
+    }
+    let mut snapshot = vec![current[1].clone(), current[3].clone()];
+    snapshot[1].close = 2.0;
+    snapshot[1].high = 2.0;
+    let bars = vec![second(9_000, 2.0)];
+    let merged = fold.merge_fetched(target, snapshot, bars, &current, Updated(12_000), 4);
+
+    assert_eq!(
+        merged,
+        [
+            current[1].clone(),
+            current[2].clone(),
+            Kline {
+                close: 2.0,
+                high: 2.0,
+                ..current[3].clone()
+            },
+            current[4].clone()
+        ]
+    );
+}
+
+#[test]
+fn a_quiet_feed_keeps_its_candles_beyond_the_snapshot() {
+    let held = vec![candle(1, 10.0), candle(2, 20.0), candle(3, 30.0)];
+    let fetched = vec![candle(1, 11.0), candle(2, 21.0)];
+    assert_eq!(
+        merge_fetched(fetched, &held, Quiet, 500),
+        vec![candle(1, 11.0), candle(2, 21.0), candle(3, 30.0)]
+    );
+}
+
+#[test]
+fn an_empty_snapshot_does_not_clear_candles_while_the_socket_is_live() {
+    let live = vec![candle(1, 10.0), candle(2, 20.0)];
+    assert_eq!(merge_fetched(Vec::new(), &live, Updated(2), 500), live);
 }
 
 #[test]
 fn without_a_live_mark_the_snapshot_replaces_the_forming_bar() {
     let fetched = vec![candle(1, 10.0), candle(2, 20.0)];
     let live = vec![candle(1, 10.0), candle(2, 25.0), candle(3, 30.0)];
-    assert_eq!(merge_fetched(fetched.clone(), &live, None, 500), fetched);
+    assert_eq!(merge_fetched(fetched.clone(), &live, Unseen, 500), fetched);
 }
 
 #[test]
 fn the_merge_keeps_the_newest_candles_up_to_the_limit() {
     let fetched = vec![candle(1, 1.0), candle(2, 2.0), candle(3, 3.0)];
     assert_eq!(
-        merge_fetched(fetched, &[], None, 2),
+        merge_fetched(fetched, &[], Unseen, 2),
         vec![candle(2, 2.0), candle(3, 3.0)]
     );
 }
 
 #[test]
-fn a_mark_guards_only_requests_begun_before_it_arrived() {
+fn a_mark_distinguishes_updates_during_the_request_from_a_quiet_feed() {
     let begun = Instant::now();
     let arrived = begun + Duration::from_secs(1);
     let mark = LiveMark::new(7, arrived);
-    assert_eq!(mark.guard_for(begun), Some(7));
-    assert_eq!(mark.guard_for(arrived), Some(7));
+    assert_eq!(mark.for_refresh(begun), Updated(7));
+    assert_eq!(mark.for_refresh(arrived), Updated(7));
     assert_eq!(
-        mark.guard_for(arrived + Duration::from_secs(1)),
-        None,
+        mark.for_refresh(arrived + Duration::from_secs(1)),
+        Quiet,
         "the socket went quiet before this request began"
     );
 }
@@ -276,9 +326,9 @@ fn merge_rest(
     fetched: Vec<Kline>,
     bars: Vec<Kline>,
     candles: &[Kline],
-    live_open: Option<i64>,
+    live: LiveRefresh,
 ) -> Vec<Kline> {
-    fold.merge_fetched(five_minutes(), fetched, bars, candles, live_open, 500)
+    fold.merge_fetched(five_minutes(), fetched, bars, candles, live, 500)
 }
 
 #[test]
@@ -288,7 +338,7 @@ fn a_bar_the_socket_has_further_along_than_rest_keeps_the_socket_volume() {
     // The answer was cut before the bar traded more than 3.
     let mut bars = rest_bars();
     bars.push(bar(3 * MINUTE, 103.0, 3.0));
-    candles = merge_rest(&mut fold, vec![held_bucket()], bars, &candles, Some(0));
+    candles = merge_rest(&mut fold, vec![held_bucket()], bars, &candles, Updated(0));
     assert_eq!(candles.len(), 1);
     assert_eq!(candles[0].volume, 15.0, "2 + 3 + 2 and the socket's 8");
     assert_eq!(candles[0].close, 112.0);
@@ -308,7 +358,7 @@ fn a_minute_the_answer_already_has_is_not_counted_again_when_the_socket_reaches_
         volume: 10.0,
         ..held_bucket()
     };
-    candles = merge_rest(&mut fold, vec![fetched], bars, &candles, None);
+    candles = merge_rest(&mut fold, vec![fetched], bars, &candles, Unseen);
     assert_eq!(candles[0].volume, 10.0);
     fold_into(&mut fold, &mut candles, bar(3 * MINUTE, 103.0, 3.0));
     assert_eq!(candles[0].volume, 10.0, "not 13");
@@ -326,7 +376,7 @@ fn the_socket_first_and_the_answer_after_make_the_whole_bucket() {
         vec![held_bucket()],
         rest_bars(),
         &candles,
-        Some(0),
+        Updated(0),
     );
     assert_eq!(candles[0].volume, 10.0);
     assert_eq!(candles[0].open, 99.0, "the first bar's open");
@@ -353,7 +403,7 @@ fn a_finished_bucket_the_answer_holds_is_not_replaced_by_the_sockets_account_of_
         vec![finished.clone(), next.clone()],
         vec![bar(5 * MINUTE, 105.0, 4.0)],
         &candles,
-        Some(0),
+        Updated(0),
     );
     assert_eq!(merged.len(), 2);
     assert_eq!(
@@ -367,7 +417,7 @@ fn a_finished_bucket_the_answer_holds_is_not_replaced_by_the_sockets_account_of_
 #[test]
 fn an_answer_with_no_bars_leaves_the_held_candle_rule_as_it_was() {
     let (mut fold, mut candles) = (LiveFold::default(), Vec::new());
-    candles = merge_rest(&mut fold, vec![held_bucket()], Vec::new(), &candles, None);
+    candles = merge_rest(&mut fold, vec![held_bucket()], Vec::new(), &candles, Unseen);
     assert_eq!(candles, vec![held_bucket()]);
     fold_into(&mut fold, &mut candles, bar(3 * MINUTE, 112.0, 3.0));
     assert_eq!(candles[0].volume, 10.0);
@@ -383,9 +433,18 @@ fn an_answer_with_no_bars_and_no_newer_socket_bar_starts_the_bucket_again() {
         volume: 6.0,
         ..candles[0].clone()
     };
-    candles = merge_rest(&mut fold, vec![refreshed], Vec::new(), &candles, None);
+    candles = merge_rest(&mut fold, vec![refreshed], Vec::new(), &candles, Unseen);
     fold_into(&mut fold, &mut candles, bar(0, 10.0, 7.0));
     assert_eq!(candles[0].volume, 6.0);
+}
+
+#[test]
+fn an_empty_snapshot_keeps_the_quiet_feeds_forming_bucket() {
+    let (mut fold, mut candles) = (LiveFold::default(), Vec::new());
+    fold_into(&mut fold, &mut candles, bar(0, 10.0, 4.0));
+    candles = merge_rest(&mut fold, Vec::new(), Vec::new(), &candles, Quiet);
+    fold_into(&mut fold, &mut candles, bar(0, 10.0, 7.0));
+    assert_eq!(candles[0].volume, 7.0);
 }
 
 #[test]
@@ -407,85 +466,9 @@ fn bars_of_a_bucket_older_than_the_forming_one_are_ignored() {
         vec![held_bucket()],
         rest_bars(),
         &candles,
-        Some(5 * MINUTE),
+        Updated(5 * MINUTE),
     );
     assert_eq!(merged.len(), 2);
     assert_eq!(merged[0], held_bucket());
     assert_eq!(merged[1], candles[0]);
-}
-
-fn trade(id: u64, time_ms: i64, price: f64, quantity: f64) -> AggregateTrade {
-    AggregateTrade {
-        id,
-        time_ms,
-        price,
-        quantity,
-    }
-}
-
-fn published(update: Option<CandleUpdate>) -> Kline {
-    let Some(CandleUpdate::Replace(bar)) = update else {
-        panic!("expected forming candle")
-    };
-    bar
-}
-
-#[test]
-fn usdm_seconds_start_on_a_covered_boundary_and_build_ordered_ohlcv() {
-    let timeframe = Timeframe::parse("7s").unwrap();
-    let mut stream = TradeBars::default();
-    assert!(stream.push(timeframe, trade(1, 1000, 9., 5.)).is_none());
-    assert!(stream.push(timeframe, trade(2, 6999, 8., 2.)).is_none());
-    let bar = published(stream.push(timeframe, trade(3, 7001, 10., 2.)));
-    assert_eq!((bar.open_time, bar.close_time), (7000, 13999));
-    assert_eq!((bar.open, bar.close, bar.volume), (10., 10., 2.));
-    assert!(stream.push(timeframe, trade(3, 7001, 10., 2.)).is_none());
-    published(stream.push(timeframe, trade(4, 7500, 13., 1.)));
-    let bar = published(stream.push(timeframe, trade(5, 7000, 8., 4.)));
-    assert_eq!(
-        (bar.open, bar.high, bar.low, bar.close, bar.volume),
-        (8., 13., 8., 13., 7.)
-    );
-    let next = published(stream.push(timeframe, trade(6, 14000, 11., 5.)));
-    assert_eq!((next.open_time, next.volume), (14000, 5.));
-    assert!(matches!(
-        stream.push(timeframe, trade(7, 13500, 10., 9.)),
-        Some(CandleUpdate::Remove(7000))
-    ));
-}
-
-#[test]
-fn usdm_seconds_retract_a_forming_candle_after_a_gap_or_disconnect() {
-    let timeframe = Timeframe::SECOND_1;
-    let mut stream = TradeBars::default();
-    assert!(stream.push(timeframe, trade(1, 1500, 10., 1.)).is_none());
-    published(stream.push(timeframe, trade(2, 2000, 11., 1.)));
-    assert!(matches!(
-        stream.push(timeframe, trade(4, 2200, 12., 1.)),
-        Some(CandleUpdate::Remove(2000))
-    ));
-    assert!(stream.push(timeframe, trade(5, 2400, 14., 1.)).is_none());
-    published(stream.push(timeframe, trade(6, 3000, 15., 1.)));
-    assert!(matches!(
-        stream.disconnect(),
-        Some(CandleUpdate::Remove(3000))
-    ));
-    assert!(stream.push(timeframe, trade(90, 5500, 20., 1.)).is_none());
-    let resumed = published(stream.push(timeframe, trade(91, 6000, 21., 3.)));
-    assert_eq!(
-        (resumed.open_time, resumed.open, resumed.volume),
-        (6000, 21., 3.)
-    );
-}
-
-#[test]
-fn usdm_custom_seconds_use_the_shared_midnight_boundary() {
-    let day = 86_400_000;
-    let timeframe = Timeframe::parse("7s").unwrap();
-    let mut stream = TradeBars::default();
-    stream.push(timeframe, trade(1, day - 10_000, 10., 1.));
-    let last = published(stream.push(timeframe, trade(2, day - 1, 11., 1.)));
-    assert_eq!((last.open_time, last.close_time), (day - 6000, day - 1));
-    let next = published(stream.push(timeframe, trade(3, day, 12., 1.)));
-    assert_eq!((next.open_time, next.close_time), (day, day + 6999));
 }

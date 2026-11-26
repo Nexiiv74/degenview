@@ -262,6 +262,7 @@ impl ChartCard {
             bars,
             constructed: constructed.as_deref(),
             outputs: &outputs,
+            pending_panes: &[],
             indicators: &indicators,
         };
         let layout = self.frame_layout(&data, framing, rect, 0.0, painter, &style);

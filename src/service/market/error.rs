@@ -71,14 +71,21 @@ impl ProviderError {
         }
     }
 
-    /// The provider said too many requests (HTTP 429).
+    /// The provider rate-limited the request.
     pub fn is_rate_limited(&self) -> bool {
         matches!(
             self,
-            Self::Network(http::Error::Status(429))
+            Self::Network(http::Error::Status(429) | http::Error::UsdMCooldown { .. })
                 | Self::Alpaca(http::Error::Status(429))
                 | Self::CoinMarketCap(http::Error::Status(429))
         )
+    }
+
+    pub fn cooldown_remaining(&self) -> Option<std::time::Duration> {
+        let Self::Network(http::Error::UsdMCooldown { resume_at }) = self else {
+            return None;
+        };
+        Some(resume_at.saturating_duration_since(std::time::Instant::now()))
     }
 }
 

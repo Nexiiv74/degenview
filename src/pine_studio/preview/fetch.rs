@@ -7,9 +7,9 @@ use super::{
 };
 use crate::format;
 use crate::i18n::tr;
-use crate::model::market::history::trim_live;
-use crate::model::market::live::{CandleUpdate, apply_live, remove_candle};
-use crate::model::{InstrumentId, Timeframe};
+use crate::model::market::history::{MAX_CANDLES, with_older};
+use crate::model::market::live::LiveMark;
+use crate::model::{DataSource, InstrumentId, Timeframe};
 use crate::service::market::live::LiveFeed;
 use crate::service::work_queue;
 use crate::service::{self, ProviderError};
@@ -30,46 +30,58 @@ impl PreviewState {
         }
         let market = self.market.clone();
         let timeframe = self.timeframe;
+        let live = self.streams_seconds();
         self.inbox = Some(work_queue::start_for(market.source, Some(ctx), move || {
-            service::fetch_klines(market.source, &market.ticker, timeframe, CANDLE_LIMIT)
+            if live {
+                service::fetch_klines_live(market.source, &market.ticker, timeframe, CANDLE_LIMIT)
+            } else {
+                service::fetch_klines(market.source, &market.ticker, timeframe, CANDLE_LIMIT)
+                    .map(Into::into)
+            }
         }));
         self.loading = true;
         self.last_fetch = Some(Instant::now());
         self.fetched_for = Some((self.market.clone(), self.timeframe));
     }
 
-    pub(super) fn stream_trades(&mut self, ctx: &egui::Context) {
-        if cfg!(test) {
+    fn streams_seconds(&self) -> bool {
+        self.market.source == DataSource::BinanceUsdM && self.timeframe.is_subminute()
+    }
+
+    pub(super) fn stream_seconds(&mut self, ctx: &egui::Context) {
+        if cfg!(test) || !self.streams_seconds() {
             return;
         }
-        if self.trade_feed.is_none() {
+        let Some(plan) = self.market.source.plan(self.timeframe) else {
+            return;
+        };
+        let base = plan.base();
+        if self.live_feed.is_none() {
             let instrument = InstrumentId::new(self.market.source, &self.market.ticker);
-            self.trade_feed = LiveFeed::connect(
+            self.live_feed = LiveFeed::connect(
                 instrument.source,
                 vec![instrument.api_symbol()],
-                self.timeframe,
+                base,
                 ctx.clone(),
             );
         }
-        let Some(feed) = &self.trade_feed else { return };
-        let updates = feed.inbox.drain_updates();
+        let Some(feed) = &self.live_feed else { return };
+        let updates = feed.inbox.drain();
         if updates.is_empty() {
             return;
         }
         let mut candles = std::mem::take(&mut self.candles);
-        for (_, update) in updates {
-            match update {
-                CandleUpdate::Replace(bar) => {
-                    apply_live(&mut candles, bar);
-                }
-                CandleUpdate::Remove(open) => {
-                    remove_candle(&mut candles, open);
-                }
+        for (_, candle) in updates {
+            if let Some(open_time) =
+                self.live_fold
+                    .apply(self.timeframe, base, &mut candles, candle)
+            {
+                self.live_mark = Some(LiveMark::new(open_time, Instant::now()));
             }
         }
-        trim_live(&mut candles);
+        let skip = candles.len().saturating_sub(MAX_CANDLES);
+        candles.drain(..skip);
         self.set_candles(candles);
-        self.loading = false;
     }
 
     pub(super) fn receive_candles(&mut self) {
@@ -86,7 +98,24 @@ impl PreviewState {
         self.inbox = None;
         self.loading = false;
         match result {
-            Ok(candles) => {
+            Ok(fresh) => {
+                let candles = if self.streams_seconds() {
+                    let live = self
+                        .last_fetch
+                        .zip(self.live_mark)
+                        .map(|(at, mark)| mark.for_refresh(at));
+                    let candles = self.live_fold.merge_fetched(
+                        self.timeframe,
+                        fresh.candles,
+                        fresh.bars,
+                        &self.candles,
+                        live.unwrap_or_default(),
+                        CANDLE_LIMIT as usize,
+                    );
+                    with_older(&self.candles, candles, true)
+                } else {
+                    fresh.candles
+                };
                 self.set_candles(candles);
                 self.error = None;
             }
@@ -120,7 +149,9 @@ impl PreviewState {
 
     fn reset_fetch(&mut self) {
         self.inbox = None;
-        self.trade_feed = None;
+        self.live_feed = None;
+        self.live_fold.reset();
+        self.live_mark = None;
         self.fetched_for = None;
         self.last_fetch = None;
         self.loading = false;
